@@ -1,11 +1,14 @@
 import numpy as np
+from scipy.special import comb
 from pydrake.examples.pendulum import (PendulumParams)
-from pydrake.all import (MathematicalProgram, Solve, SolverOptions, CommonSolverOption)
+from pydrake.all import (MathematicalProgram, Solve, SolverOptions, CommonSolverOption, MosekSolver)
 from matplotlib import cm
 import matplotlib.pyplot as plt
 
 BERNSTEIN = "bernstein"
 CHEBYSHEV = "chebyshev"
+LEGENDRE = "legendre"
+MONOMIAL = "monomial"
 
 def pendulum_setup(poly_type=CHEBYSHEV):
     nz = 3
@@ -14,6 +17,8 @@ def pendulum_setup(poly_type=CHEBYSHEV):
     # Uses sympy to be able to do symbolic integration later on.
     if poly_type == BERNSTEIN:
         x2z = lambda x : np.array([(np.sin(x[0]) + 1)/2, (np.cos(x[0])+1)/2, (x[1]+2*np.pi)/(4*np.pi)])
+    elif poly_type == MONOMIAL:
+        x2z = lambda x : np.array([np.sin(x[0]), np.cos(x[0]), x[1]])
     else:
         x2z = lambda x : np.array([np.sin(x[0]), np.cos(x[0]), x[1]/(2*np.pi)])
 
@@ -38,15 +43,19 @@ def pendulum_setup(poly_type=CHEBYSHEV):
         
     # Quadratic running cost in augmented state.
     Q = np.diag([1, 1, 1])
-    R = np.diag([1])
+    R = np.diag([5])
     def l(z, u):
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
 
     Rinv = np.linalg.inv(R)
     f2 = np.array([[0], [0], [1 / inertia]])
     params_dict = {"x_min": x_min, "x_max": x_max, "x2z":x2z, "f":f, "l":l,
-                   "nz": nz, "f2": f2, "Rinv": Rinv}
+                   "nz": nz, "f2": f2, "Rinv": Rinv, "z0": z0}
     return params_dict
+
+
+def monomial(x, n, d):
+    return x**n
 
 
 def bernstein_polynomial(t, i, n):
@@ -54,8 +63,22 @@ def bernstein_polynomial(t, i, n):
     return c * t**i * (1-t)**(n-i)
 
 
-def fitted_value_iteration_drake(poly_deg, params_dict, dt=0.1):
-    n_mesh = 21
+def chebyshev_polynomial(x, n, d):
+    v = 0
+    for k in range(int(np.floor(n/2)) + 1):
+        v += (-1)**k * comb(n-k, k)*(2*x)**(n-2*k)
+    return v
+
+
+def legendre_polynomial(x, n, d):
+    v = 0
+    for k in range(n + 1):
+        v += comb(n, k) * comb(n+k, k) * ((x-1)/2)**k
+    return v
+
+
+def fitted_value_iteration_drake(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0.1, gamma=1):
+    n_mesh = 51
     mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
     coeff_shape = np.ones(params_dict["nz"], dtype=int) * (poly_deg + 1)
     old_coeff = np.zeros(coeff_shape)
@@ -63,7 +86,14 @@ def fitted_value_iteration_drake(poly_deg, params_dict, dt=0.1):
     f = params_dict["f"]
     l = params_dict["l"]
 
-    poly_func = lambda t, i, n: bernstein_polynomial(t, i, n)
+    if poly_type == CHEBYSHEV:
+        poly_func = lambda t, i, n: chebyshev_polynomial(t, i, n)
+    elif poly_type == LEGENDRE:
+        poly_func = lambda t, i, n: legendre_polynomial(t, i, n)
+    elif poly_type == BERNSTEIN:
+        poly_func = lambda t, i, n: bernstein_polynomial(t, i, n)
+    elif poly_type == MONOMIAL:
+        poly_func = lambda t, i, n: monomial(t, i, n)
 
     for iter in range(100):
         print("Iter: ", iter)
@@ -80,20 +110,25 @@ def fitted_value_iteration_drake(poly_deg, params_dict, dt=0.1):
                 u_opt = calc_u_opt(dJdz_expr, z_var, z, params_dict)
                 z_next = f(z, u_opt) * dt + z
 
-                J_target = l(z, u_opt) * dt + calc_value_function(z_next,
-                                                                  old_coeff, poly_func)                                
+                # J_target = l(z, u_opt) * dt + gamma * calc_value_function(z_next,
+                #                                                   old_coeff, poly_func)
+                J_target = l(z, u_opt) * dt + gamma * calc_value_function(z_next,
+                                                                  J_coeff, poly_func)                                 
                 J = calc_value_function(z, J_coeff, poly_func)
                 prog.AddQuadraticCost((J-J_target)*(J-J_target))
-        
+
+        # J(z0) = 0
+        J0 = calc_value_function(params_dict["z0"], J_coeff, poly_func)
+        prog.AddLinearConstraint(J0 == 0)
         options = SolverOptions()
         options.SetOption(CommonSolverOption.kPrintToConsole, 1)
         prog.SetSolverOptions(options)
         result = Solve(prog)
 
         coeff = result.GetSolution(J_coeff_var).reshape(coeff_shape)
-
+        print("Diff: ", np.linalg.norm(coeff-old_coeff))
         if np.allclose(coeff, old_coeff):
-            plot_value_function(coeff, mesh_pts, params_dict, poly_func)
+            plot_value_function(coeff, params_dict, poly_func, dt, poly_type)
             return coeff
 
         if result.is_success():
@@ -102,7 +137,7 @@ def fitted_value_iteration_drake(poly_deg, params_dict, dt=0.1):
             print("Optimizer fails")
 
 
-def fitted_value_iteration(poly_deg, params_dict, dt=0.1, gamma=1):
+def fitted_value_iteration(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0.1, gamma=1):
     n_mesh = 51
     mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
     coeff_shape = np.ones(params_dict["nz"], dtype=int) * (poly_deg + 1)
@@ -111,69 +146,82 @@ def fitted_value_iteration(poly_deg, params_dict, dt=0.1, gamma=1):
     f = params_dict["f"]
     l = params_dict["l"]
 
-    poly_func = lambda t, i, n: bernstein_polynomial(t, i, n)
+    if poly_type == CHEBYSHEV:
+        poly_func = lambda t, i, n: chebyshev_polynomial(t, i, n)
+    elif poly_type == LEGENDRE:
+        poly_func = lambda t, i, n: legendre_polynomial(t, i, n)
+    elif poly_type == BERNSTEIN:
+        poly_func = lambda t, i, n: bernstein_polynomial(t, i, n)
+    elif poly_type == MONOMIAL:
+        poly_func = lambda t, i, n: monomial(t, i, n)
     Z = []
 
     for iter in range(100):
         print("Iter: ", iter)
         dJdz_expr, z_var = calc_dJdz(old_coeff, poly_func, params_dict)
         J_target = []
+        l_target = []
+        Z_next = []
         for i in range(n_mesh):     
             theta = mesh_pts[i, 0]  
             for j in range(n_mesh):
                 thetadot = mesh_pts[j, 1]
                 z = x2z([theta, thetadot])
                 if iter == 0:
-                    basis = calc_bernstein_basis(z, coeff_shape)
+                    basis = calc_basis(z, coeff_shape, poly_func)
                     Z.append(basis)
 
                 u_opt = calc_u_opt(dJdz_expr, z_var, z, params_dict)
                 z_next = f(z, u_opt) * dt + z
 
-                J_target.append(l(z, u_opt) * dt + gamma * calc_value_function(z_next,
-                                                                  old_coeff, poly_func))                                
+                l_target.append(l(z, u_opt))
+                Z_next.append(calc_basis(z_next, coeff_shape, poly_func))
+                # J_target.append(l(z, u_opt) * dt + gamma * old_coeff.flatten().dot(calc_basis(z_next, coeff_shape, poly_func)))   
+                # J_target.append(l(z, u_opt) * dt + gamma * calc_value_function(z_next,
+                #                                                   old_coeff, poly_func))                                
                 
         if iter == 0:
             Z = np.array(Z)
         J_target = np.array(J_target)
-        coeff = np.linalg.lstsq(Z, J_target)[0].reshape(coeff_shape)
+        Z_next = np.array(Z_next)
+        coeff = np.linalg.lstsq((Z-Z_next), l_target)[0].reshape(coeff_shape)
+        # coeff = np.linalg.lstsq(Z, J_target)[0].reshape(coeff_shape)
         
         if np.allclose(coeff, old_coeff):
             plot_value_function(coeff, mesh_pts, params_dict, poly_func)
             return coeff
         else:
-            print("Error: ", np.linalg.norm(coeff-old_coeff))
+            print("Diff: ", np.linalg.norm(coeff-old_coeff))
             old_coeff = coeff
 
     return coeff
 
 
-def plot_value_function(coeff, mesh_pts, params_dict, poly_func):
-    # [X, Y] = np.meshgrid(mesh_pts[:, 0], mesh_pts[:, 1])
+def plot_value_function(coeff, params_dict, poly_func, dt, poly_type=MONOMIAL):
     x2z = params_dict["x2z"]
     x_min = params_dict["x_min"]
     x_max = params_dict["x_max"]
 
-
-    n_mesh = mesh_pts.shape[0]
-    J = np.zeros([n_mesh, n_mesh])
-    for i in range(n_mesh):
-        theta = mesh_pts[i, 0]
-        for j in range(n_mesh):
-            thetadot = mesh_pts[j, 1]
-            z = x2z([theta, thetadot])
-            J[i, j] = calc_value_function(z, coeff, poly_func)
-
+    X1, X2 = np.meshgrid(np.linspace(x_min[0], x_max[0], 51),
+                        np.linspace(x_min[1], x_max[1], 51))
+    X = np.vstack((X1.flatten(), X2.flatten()))
+    Z = x2z(X)
+    J = np.zeros(Z.shape[1])
+    for i in range(Z.shape[1]):
+        J[i] = calc_value_function(Z[:,i], coeff, poly_func)
+    J = J.reshape(X1.shape)
+    
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
     ax.set_xlabel("q")
     ax.set_ylabel("qdot")
     ax.set_title("Cost-to-Go")
-    ax.imshow(J,
+    im = ax.imshow(J,
             cmap=cm.jet, aspect='auto',
             extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
     ax.invert_yaxis()
-    plt.savefig("fvi_pendulum_swingup.png")
+    fig.colorbar(im)
+    plt.savefig("figures/fvi/fvi_pendulum_swingup_{}_{}.png".format(dt, poly_type))
 
 
 def calc_dJdz(coeff, poly_func, params_dict):
@@ -192,7 +240,7 @@ def calc_u_opt(dJdz_expr, z_var, z_value, params_dict):
     return u_star
 
 
-def calc_bernstein_basis(z, coeff_shape):
+def calc_basis(z, coeff_shape, poly_func):
     Z = np.zeros(coeff_shape)
     deg = coeff_shape - 1
     it = np.nditer(Z, flags=['multi_index'])
@@ -200,7 +248,7 @@ def calc_bernstein_basis(z, coeff_shape):
         idx = it.multi_index
         b = 1
         for dim in range(len(idx)):
-            b *= bernstein_polynomial(z[dim], idx[dim], deg[dim])
+            b *= poly_func(z[dim], idx[dim], deg[dim])
         Z[idx] = b
     return Z.flatten()
 
@@ -218,6 +266,7 @@ def calc_value_function(x, K, poly_func):
 
 
 if __name__ == '__main__':
-    params_dict = pendulum_setup(BERNSTEIN)
+    poly_type = MONOMIAL
+    params_dict = pendulum_setup(poly_type)
     deg = 2
-    fitted_value_iteration(deg, params_dict, dt=0.1, gamma=1)
+    fitted_value_iteration_drake(deg, params_dict, poly_type, dt=0.1, gamma=1)
