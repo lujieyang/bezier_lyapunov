@@ -15,5 +15,10 @@ class TestPolynomial(unittest.TestCase):
         P4 = (35 * x**4 - 30 * x**2 + 3)/8
         self.assertTrue(P4.Evaluate({x:4}) == legendre_polynomial(x, 4, 0).Evaluate({x:4}))
 
+    def test_hermite(self):
+        x = Variable("x")
+        H4 = 16 * x**4 - 48 * x**2 + 12
+        self.assertTrue(H4.Evaluate({x:4}) == hermite_polynomial(x, 4, 0).Evaluate({x:4}))
+
 if __name__ == '__main__':
     unittest.main()
