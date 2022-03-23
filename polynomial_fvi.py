@@ -44,7 +44,7 @@ def pendulum_setup(poly_type=CHEBYSHEV):
     z0 = x2z(x0)
         
     # Quadratic running cost in augmented state.
-    Q = np.diag([1, 1, 1]) * 5
+    Q = np.diag([1, 1, 1]) * 2
     R = np.diag([1])
     def l(z, u):
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
@@ -219,9 +219,13 @@ def plot_value_function(coeff, params_dict, poly_func, dt, poly_type=MONOMIAL, m
     X = np.vstack((X1.flatten(), X2.flatten()))
     Z = x2z(X)
     J = np.zeros(Z.shape[1])
+    U = np.zeros(Z.shape[1])
+    dJdz_expr, z_var = calc_dJdz(coeff, poly_func, params_dict)
     for i in range(Z.shape[1]):
         J[i] = calc_value_function(Z[:,i], coeff, poly_func)
+        U[i] = calc_u_opt(dJdz_expr, z_var, Z[:,i], params_dict) 
     J = J.reshape(X1.shape)
+    U = U.reshape(X1.shape)
     
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -234,6 +238,18 @@ def plot_value_function(coeff, params_dict, poly_func, dt, poly_type=MONOMIAL, m
     ax.invert_yaxis()
     fig.colorbar(im)
     plt.savefig("figures/fvi/{}/fvi_pendulum_swingup_{}_{}.png".format(method, dt, poly_type))
+
+    fig = plt.figure(figsize=(9, 4))
+    ax = fig.subplots()
+    ax.set_xlabel("q")
+    ax.set_ylabel("qdot")
+    ax.set_title("Optimal Policy")
+    im = ax.imshow(U,
+            cmap=cm.jet, aspect='auto',
+            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+    ax.invert_yaxis()
+    fig.colorbar(im)
+    plt.savefig("figures/fvi/{}/fvi_pendulum_swingup_policy_{}_{}.png".format(method, dt, poly_type))
 
 
 def calc_dJdz(coeff, poly_func, params_dict):
@@ -279,7 +295,7 @@ def calc_value_function(x, K, poly_func):
 
 if __name__ == '__main__':
     method = "drake"
-    poly_type = HERMITE
+    poly_type = MONOMIAL
     params_dict = pendulum_setup(poly_type)
     deg = 2
     if method == "lstsq":
