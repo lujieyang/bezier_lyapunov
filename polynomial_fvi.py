@@ -198,8 +198,6 @@ def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
         coeff = np.linalg.lstsq((Z-gamma *Z_next), l_target)[0].reshape(coeff_shape)
         
         if np.allclose(coeff, old_coeff):
-            J0 = (coeff.flatten()).dot(calc_basis(params_dict["z0"], coeff_shape, poly_func))
-            coeff -= J0
             plot_value_function(coeff, params_dict, poly_func, dt, poly_type)
             return coeff
         else:
@@ -221,10 +219,11 @@ def plot_value_function(coeff, params_dict, poly_func, dt, poly_type=MONOMIAL, m
     J = np.zeros(Z.shape[1])
     U = np.zeros(Z.shape[1])
     dJdz_expr, z_var = calc_dJdz(coeff, poly_func, params_dict)
+    J0 = calc_value_function(params_dict["z0"], coeff, poly_func)
     for i in range(Z.shape[1]):
         J[i] = calc_value_function(Z[:,i], coeff, poly_func)
         U[i] = calc_u_opt(dJdz_expr, z_var, Z[:,i], params_dict) 
-    J = J.reshape(X1.shape)
+    J = J.reshape(X1.shape) - J0
     U = U.reshape(X1.shape)
     
     fig = plt.figure(figsize=(9, 4))
@@ -294,7 +293,7 @@ def calc_value_function(x, K, poly_func):
 
 
 if __name__ == '__main__':
-    method = "drake"
+    method = "lstsq"
     poly_type = MONOMIAL
     params_dict = pendulum_setup(poly_type)
     deg = 2
