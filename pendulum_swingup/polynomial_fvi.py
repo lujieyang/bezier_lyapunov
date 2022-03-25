@@ -11,6 +11,8 @@ CHEBYSHEV = "chebyshev"
 LEGENDRE = "legendre"
 MONOMIAL = "monomial"
 HERMITE = "hermite"
+DRAKE = "drake"
+LSTSQ = "lstsq"
 
 def pendulum_setup(poly_type=CHEBYSHEV):
     nz = 3
@@ -34,6 +36,11 @@ def pendulum_setup(poly_type=CHEBYSHEV):
             - z[0] * z[2],
             (tau_g * z[0] + u[0] - params.damping() * z[2]) / inertia
         ])
+    def f_x(x, u):
+        return np.array([
+            x[1],
+            (tau_g * np.sin(x[0]) + u[0] - params.damping() * x[1]) / inertia
+        ])
 
     # State limits (region of state space where we approximate the value function).
     x_max = np.array([np.pi, 2*np.pi])
@@ -45,14 +52,17 @@ def pendulum_setup(poly_type=CHEBYSHEV):
         
     # Quadratic running cost in augmented state.
     Q = np.diag([1, 1, 1]) * 2
-    R = np.diag([1])
+    Qx = np.diag([1, 1]) * 2
+    R = np.diag([1]) 
     def l(z, u):
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
+    def l_x(x, u):
+        return (x - x0).dot(Qx).dot(x - x0) + u.dot(R).dot(u)
 
     Rinv = np.linalg.inv(R)
     f2 = np.array([[0], [0], [1 / inertia]])
     params_dict = {"x_min": x_min, "x_max": x_max, "x2z":x2z, "f":f, "l":l,
-                   "nz": nz, "f2": f2, "Rinv": Rinv, "z0": z0}
+                   "nz": nz, "f2": f2, "Rinv": Rinv, "z0": z0, "f_x": f_x, "l_x": l_x}
     return params_dict
 
 
@@ -95,6 +105,7 @@ def fitted_value_iteration_drake(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
     old_coeff = np.zeros(coeff_shape)
     x2z = params_dict["x2z"]
     f = params_dict["f"]
+    f_x = params_dict["f_x"]
     l = params_dict["l"]
 
     if poly_type == CHEBYSHEV:
@@ -119,8 +130,11 @@ def fitted_value_iteration_drake(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
             theta = mesh_pts[i, 0]
             for j in range(n_mesh):
                 thetadot = mesh_pts[j, 1]
-                z = x2z([theta, thetadot])
+                x = np.array([theta, thetadot])
+                z = x2z(x)
                 u_opt = calc_u_opt(dJdz_expr, z_var, z, params_dict)
+                # x_next = f_x(x, u_opt) * dt + x
+                # z_next = x2z(x_next)
                 z_next = f(z, u_opt) * dt + z
                 J_target = l(z, u_opt) * dt + gamma * calc_value_function(z_next,
                                                                   J_coeff, poly_func)                                 
@@ -139,7 +153,7 @@ def fitted_value_iteration_drake(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
         coeff = result.GetSolution(J_coeff_var).reshape(coeff_shape)
         print("Diff: ", np.linalg.norm(coeff-old_coeff))
         if np.allclose(coeff, old_coeff):
-            plot_value_function(coeff, params_dict, poly_func, dt, poly_type, "drake")
+            plot_value_function(coeff, params_dict, poly_func, deg, dt, poly_type, DRAKE)
             return coeff
 
         if result.is_success():
@@ -149,14 +163,16 @@ def fitted_value_iteration_drake(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
 
 
 def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0.1, gamma=1):
-    n_mesh = 51
+    n_mesh = 101
     mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
     mesh_pts[int(np.floor(n_mesh/2))] = 0
     coeff_shape = np.ones(params_dict["nz"], dtype=int) * (poly_deg + 1)
     old_coeff = np.zeros(coeff_shape)
     x2z = params_dict["x2z"]
     f = params_dict["f"]
+    f_x = params_dict["f_x"]
     l = params_dict["l"]
+    l_x = params_dict["l_x"]
 
     if poly_type == CHEBYSHEV:
         poly_func = lambda t, i, n: chebyshev_polynomial(t, i, n)
@@ -170,7 +186,7 @@ def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
         poly_func = lambda t, i, n: monomial(t, i, n)
     Z = []
 
-    for iter in range(100):
+    for iter in range(500):
         print("Iter: ", iter)
         dJdz_expr, z_var = calc_dJdz(old_coeff, poly_func, params_dict)
         J_target = []
@@ -180,15 +196,21 @@ def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
             theta = mesh_pts[i, 0]  
             for j in range(n_mesh):
                 thetadot = mesh_pts[j, 1]
-                z = x2z([theta, thetadot])
+                x = np.array([theta, thetadot])
+                z = x2z(x)
                 if iter == 0:
                     basis = calc_basis(z, coeff_shape, poly_func)
                     Z.append(basis)
 
                 u_opt = calc_u_opt(dJdz_expr, z_var, z, params_dict)
-                z_next = f(z, u_opt) * dt + z
+                x_next = f_x(x, u_opt) * dt + x
+                z_next = x2z(x_next)
+                # z_next_0 = f(z, u_opt) * dt + z
+                if poly_type != MONOMIAL and poly_type != HERMITE:
+                    z_next = np.clip(z_next, -1, 1)
 
                 l_target.append(l(z, u_opt) * dt)
+                # J_target.append(l(z, u_opt) * dt + gamma * old_coeff.flatten().dot(calc_basis(z_next, coeff_shape, poly_func)))
                 Z_next.append(calc_basis(z_next, coeff_shape, poly_func))                             
                 
         if iter == 0:
@@ -196,9 +218,10 @@ def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
         J_target = np.array(J_target)
         Z_next = np.array(Z_next)
         coeff = np.linalg.lstsq((Z-gamma *Z_next), l_target)[0].reshape(coeff_shape)
+        # coeff = np.linalg.lstsq(Z, J_target)[0].reshape(coeff_shape)
         
         if np.allclose(coeff, old_coeff):
-            plot_value_function(coeff, params_dict, poly_func, dt, poly_type)
+            plot_value_function(coeff, params_dict, poly_func, deg, dt, poly_type)
             return coeff
         else:
             print("Diff: ", np.linalg.norm(coeff-old_coeff))
@@ -207,7 +230,7 @@ def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
     return coeff
 
 
-def plot_value_function(coeff, params_dict, poly_func, dt, poly_type=MONOMIAL, method="lstsq"):
+def plot_value_function(coeff, params_dict, poly_func, deg, dt, poly_type=MONOMIAL, method=LSTSQ):
     x2z = params_dict["x2z"]
     x_min = params_dict["x_min"]
     x_max = params_dict["x_max"]
@@ -236,7 +259,7 @@ def plot_value_function(coeff, params_dict, poly_func, dt, poly_type=MONOMIAL, m
             extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("figures/fvi/{}/fvi_pendulum_swingup_{}_{}.png".format(method, dt, poly_type))
+    plt.savefig("figures/fvi/{}/fvi_pendulum_swingup_{}_{}_{}.png".format(method, deg, dt, poly_type))
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -248,7 +271,7 @@ def plot_value_function(coeff, params_dict, poly_func, dt, poly_type=MONOMIAL, m
             extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("figures/fvi/{}/fvi_pendulum_swingup_policy_{}_{}.png".format(method, dt, poly_type))
+    plt.savefig("figures/fvi/{}/fvi_pendulum_swingup_policy_{}_{}_{}.png".format(method, deg, dt, poly_type))
 
 
 def calc_dJdz(coeff, poly_func, params_dict):
@@ -293,13 +316,14 @@ def calc_value_function(x, K, poly_func):
 
 
 if __name__ == '__main__':
-    method = "lstsq"
+    method = LSTSQ
     poly_type = MONOMIAL
     params_dict = pendulum_setup(poly_type)
     deg = 2
-    if method == "lstsq":
-        J = fitted_value_iteration_lstsq(deg, params_dict, poly_type, dt=0.1, gamma=.999)
-    elif method == "drake":
-        J = fitted_value_iteration_drake(deg, params_dict, poly_type, dt=0.1, gamma=1)
+    dt = 0.001
+    if method == LSTSQ:
+        J = fitted_value_iteration_lstsq(deg, params_dict, poly_type, dt=dt, gamma=.999)
+    elif method == DRAKE:
+        J = fitted_value_iteration_drake(deg, params_dict, poly_type, dt=dt, gamma=1)
         
-    np.save("{}/J_{}".format(method, poly_type), J)
+    np.save("pendulum_swingup/{}/{}/J_{}_{}.npy".format(method, poly_type, deg, dt), J)

@@ -41,7 +41,7 @@ def pendulum_sos_dp(deg):
     z0 = x2z(x0)
         
     # Quadratic running cost in augmented state.
-    Q = np.diag([1, 1, 1]) * 80
+    Q = np.diag([1, 1, 1]) * 50
     R = np.diag([1])
     def l(z, u):
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
@@ -126,5 +126,3 @@ def pendulum_sos_dp(deg):
 
 if __name__ == '__main__':
     J_star, u_star, z = pendulum_sos_dp(deg=14)
-
-
