@@ -41,8 +41,8 @@ def pendulum_sos_dp(deg):
     z0 = x2z(x0)
         
     # Quadratic running cost in augmented state.
-    Q = np.diag([1, 1, 1])
-    R = np.diag([5])
+    Q = np.diag([1, 1, 1]) * 80
+    R = np.diag([1])
     def l(z, u):
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
 
@@ -62,10 +62,15 @@ def pendulum_sos_dp(deg):
     # S procedure for s^2 + c^2 = 1.
     lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
     S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
+    lam_1 = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_procedure_1 = lam_1 * (z[0]**2 + z[1]**2 - 1)
 
     # Enforce Bellman inequality.
     J_dot = J_expr.Jacobian(z).dot(f(z, u))
     prog.AddSosConstraint(J_dot + l(z, u) + S_procedure)
+
+    # Enforce that value function is PD
+    prog.AddSosConstraint(J_expr + S_procedure_1)
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
@@ -87,8 +92,10 @@ def pendulum_sos_dp(deg):
     X = np.vstack((X1.flatten(), X2.flatten()))
     Z = x2z(X)
     J = np.zeros(Z.shape[1])
+    U = np.zeros(Z.shape[1])
     for i in range(Z.shape[1]):
         J[i] = J_star.Evaluate({z[0]: Z[0, i], z[1]: Z[1, i], z[2]: Z[2, i]})
+        U[i] = u_star[0].Evaluate({z[0]: Z[0, i], z[1]: Z[1, i], z[2]: Z[2, i]})
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -100,12 +107,24 @@ def pendulum_sos_dp(deg):
             extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("pendulum_swinup.png")
+    plt.savefig("figures/fvi/pendulum_swingup.png")
+
+    fig = plt.figure(figsize=(9, 4))
+    ax = fig.subplots()
+    ax.set_xlabel("q")
+    ax.set_ylabel("qdot")
+    ax.set_title("Policy")
+    im = ax.imshow(U.reshape(X1.shape),
+            cmap=cm.jet, aspect='auto',
+            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+    ax.invert_yaxis()
+    fig.colorbar(im)
+    plt.savefig("figures/fvi/pendulum_swingup_policy.png")
 
     return J_star, u_star, z
 
 
 if __name__ == '__main__':
-    J_star, u_star, z = pendulum_sos_dp(deg=4)
+    J_star, u_star, z = pendulum_sos_dp(deg=14)
 
 
