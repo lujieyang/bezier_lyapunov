@@ -55,13 +55,24 @@ class TestBezier(unittest.TestCase):
         der = bezier_operation.bernstein_derivative(p_bern)
         np.testing.assert_allclose(p_der_bern, der[0])
 
+    def test_bernstein_definite_integral(self):
+        p = np.array([9, 5, 1])
+        p_int = np.polyint(np.flip(p))
+        p_bern = bezier_operation.power_to_bernstein_poly(p)
+        p_int_bern = np.polyval(p_int,0.5)
+
+        integral = bezier_operation.bernstein_definite_integral(p_bern, 0.5)
+        np.testing.assert_allclose(p_int_bern, integral)
+
     def test_bernstein_integral(self):
         p = np.array([9, 5, 1])
         p_int = np.polyint(np.flip(p))
         p_bern = bezier_operation.power_to_bernstein_poly(p)
-        p_int_bern = np.polyval(p_int,1) - np.polyval(p_int,0)
+        lo = 0.2
+        hi = 0.8
+        p_int_bern = np.polyval(p_int, hi) - np.polyval(p_int, lo)
 
-        integral = bezier_operation.bernstein_integral(p_bern)
+        integral = bezier_operation.bernstein_integral(p_bern, lo, hi)
         np.testing.assert_allclose(p_int_bern, integral)
 
 

@@ -116,9 +116,33 @@ def bernstein_derivative(X):
     return D
 
 
-def bernstein_integral(X):
+def bernstein_integral(X, lo=0, up=1):
+    end = bernstein_definite_integral(X, up)
+    start = bernstein_definite_integral(X, lo)
+    return end-start
+
+
+def bernstein_definite_integral(X, val):
     dim = np.array(X.shape)
-    return np.sum(X)/np.product(dim)
+    if val == 0:
+        return 0
+    elif val == 1:
+        return np.sum(X)/np.product(dim)
+    else:
+        it = np.nditer(X, flags=['multi_index'])
+        integral = 0
+        for x in it:
+            idx = it.multi_index
+            int_idx = 1
+            for d in range(len(idx)):
+                n = dim[d] - 1
+                k = idx[d]
+                b = 0
+                for j in range(k+1, n+2):
+                    b += BernsteinPolynomial(val, j, n+1)
+                int_idx *= b/(n+1)
+            integral += X[idx] * int_idx
+        return integral
 
 
 def BezierCurve(t, x):
@@ -128,7 +152,7 @@ def BezierCurve(t, x):
 
 
 def BernsteinPolynomial(t, i, n):
-    c = np.math.factorial(n) / (np.math.factorial(i) * np.math.factorial(n - i))
+    c = comb(n, i)
     return c * t**i * (1-t)**(n-i)
 
 
