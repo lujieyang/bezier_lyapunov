@@ -66,6 +66,28 @@ def pendulum_lyapunov(deg, l_deg, alpha=0, eps=1e-3):
     V_opt = result.GetSolution(V_var).reshape(num_V_degrees+1)
     return V_opt, f_bern
 
+
+def sos_cubic_lyapunov(alpha = 0.5):
+    prog = MathematicalProgram()
+    x = prog.NewIndeterminates(1, "x")
+    f = -x + x**3
+
+    V = prog.NewSosPolynomial(Variables(x), 2)[0].ToExpression()
+    prog.AddLinearConstraint(V.Substitute({x[0]: 0}) == 0)
+    prog.AddLinearConstraint(V.Substitute({x[0]: 1}) == 1)
+    Vdot = V.Jacobian(x).dot(f)
+
+    lambda_ = prog.NewSosPolynomial(Variables(x), 2)[0].ToExpression()
+
+    prog.AddSosConstraint((-Vdot - alpha*V - lambda_ * (0.81 - x**2))[0])
+
+    result = Solve(prog)
+    assert result.is_success()
+
+    print("Solution:", Polynomial(result.GetSolution(V)).RemoveTermsWithSmallCoefficients(1e-5).ToExpression())
+    return result.GetSolution(V), result.GetSolution(Vdot), x
+
+
 def cubic_lyapunov(deg, alpha=.1, eps=1e-3):
     # \dot x = -x + x^3
     f = np.array([0, -1, 0, 1/4])
@@ -176,21 +198,25 @@ def main_lyapunov():
     plt.legend()
     plt.savefig("lyapnov.png")
 
+def plot_sos(V, x, x_lo, x_up, label="f(x)"):
+    n_breaks = 101
+    x_pts = np.linspace(x_lo, x_up, n_breaks)
+
+    y = []
+    for i in range(n_breaks):
+        y.append(V.Evaluate({x[0]: x_pts[i]}))
+
+    plt.plot(x_pts, y, label=label)
+    plt.title("SOS Lyapunov")
+
 
 if __name__ == '__main__':
-    main_lyapunov()
+    # main_lyapunov()
+    V, Vdot, x = sos_cubic_lyapunov(0)
+    plot_sos(V, x, -1, 1, label="V")
+    plot_sos(Vdot, x, -1, 1, label="Vdot")
+    plt.savefig("sos.png")
     # V, f_bern = pendulum_lyapunov(4 * np.ones(3, dtype=int), [2, 2, 2],alpha=0)
     # V *=1e3
     # plot_energy(V)
     # cubic_control_affine_dp(10)
-
-
-
-
-
-
-
-
-
-
-
