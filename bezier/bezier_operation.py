@@ -7,6 +7,7 @@ from pydrake.all import (Variable, Variables, Polynomial)
 
 
 def power_to_bernstein_poly(X):
+    # The different interval other than [0,1] has impact on this function.
     N = np.array(X.shape) - 1
     num_var = len(N)
     Z = np.zeros(num_var, dtype=int)  # multi-index with all 0's
@@ -129,7 +130,7 @@ def bernstein_definite_integral(X, val):
     elif val == 1:
         return np.sum(X)/np.product(dim)
     else:
-        it = np.nditer(X, flags=['multi_index'])
+        it = np.nditer(X, flags=['multi_index', 'refs_ok'])
         integral = 0
         for x in it:
             idx = it.multi_index
@@ -151,9 +152,9 @@ def BezierCurve(t, x):
     return (1-t)*BezierCurve(t, x[:-1]) + t*BezierCurve(t, x[1:])
 
 
-def BernsteinPolynomial(t, i, n):
+def BernsteinPolynomial(t, i, n, lo=0, up=1):
     c = comb(n, i)
-    return c * t**i * (1-t)**(n-i)
+    return c * (t-lo)**i * (up-t)**(n-i) / (up-lo)**n
 
 
 # a multi-dimensional Bezier surface in the variables x with degrees K.shape-1
