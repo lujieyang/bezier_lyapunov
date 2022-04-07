@@ -226,6 +226,55 @@ def cubic_control_affine_dp(deg):
     return J_opt, 0
 
 
+def cubic_control_affine_dp_lower_bound(deg):
+    print("Degree: ", deg)
+    f1 = np.array([0, 1, 0, -4])
+    f2 = np.array([1])
+
+    l1 = np.array([0, 0, 1])
+
+    R = 1
+
+    num_J_degrees = np.array([deg])
+    num_var = len(num_J_degrees)
+    Z = tuple(np.zeros(num_var, dtype=int))
+    prog = MathematicalProgram()
+    J_var = prog.NewContinuousVariables(np.product(num_J_degrees+1),
+                                    "J")  # Drake is not working for tensor, so vectorize the tensor
+    J = np.array(J_var).reshape(num_J_degrees+1)
+
+    dJdx = bernstein_derivative(J)[0]
+
+    f1_bern = power_to_bernstein_poly(f1)
+    f2_bern = power_to_bernstein_poly(f2)
+    l1_bern = power_to_bernstein_poly(l1)
+
+    dJdx_f1 = bernstein_mul(dJdx, f1_bern, dtype=Variable)  
+    dJdx_f2 = bernstein_mul(dJdx, f2_bern, dtype=Variable)
+    last_term = -bernstein_mul(dJdx_f2, dJdx_f2, dtype=Variable)/4
+    LHS = bernstein_add(bernstein_add(l1_bern, dJdx_f1), last_term)
+
+    prog.AddLinearConstraint(J[Z] == 0)
+    prog.AddLinearConstraint(ge(J, 0))
+    eq_constraint = ge(LHS, 0)
+    for c in eq_constraint.flatten():
+        if len(c.GetFreeVariables()) > 0:
+            prog.AddConstraint(c)
+
+    J_int = bernstein_integral(J)
+    prog.AddLinearCost(-J_int)
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    print(result.is_success())
+    print(result.get_solver_id().name())
+
+    J_opt = np.squeeze(result.GetSolution(J))
+    return J_opt, -result.get_optimal_cost()
+
+
 def check_cubic_control_affine_dp(J):
     Z = tuple(np.zeros(len(J.shape), dtype=int))
     f1 = np.array([0, 1, 0, -4])
@@ -250,8 +299,8 @@ def check_cubic_control_affine_dp(J):
 
 
 def main_dp():
-    degrees = np.arange(2, 36, 4)
-    J = {deg: cubic_control_affine_dp(deg) for deg in degrees}
+    degrees = np.arange(2, 32, 4)
+    J = {deg: cubic_control_affine_dp_lower_bound(deg) for deg in degrees}
 
     n_breaks = 101
     x_breaks = np.linspace(0, 1, n_breaks)
@@ -271,6 +320,7 @@ def main_dp():
     plt.xlabel(r'$x$')
     plt.ylabel(r'$v$')
     plt.title('Value-function lower bound')
+    # plt.title('Value-function approximation')
     plt.legend()
     plt.grid(True)
 
@@ -341,7 +391,8 @@ def optimal_cost_to_go():
 
 
 if __name__ == '__main__':
-    # main_dp()
+    main_dp()
+    # cubic_control_affine_dp_lower_bound(2)
     # J, _ = cubic_control_affine_dp(24)
     # check_cubic_control_affine_dp(J)
-    main_piecewise_dp()
+    # main_piecewise_dp()

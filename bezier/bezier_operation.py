@@ -194,8 +194,10 @@ def check_coeff_positivity():
     while (f_bern < 0).any():
         f_bern = bernstein_degree_elevation(f_bern, np.array([1]))
         deg += 1
-        if deg % 10 == 0:
-            print("Degree: {}, min coeff: {}".format(deg, np.min(f_bern)))
+        # if deg % 10 == 0:
+        neg_idx = np.where(f_bern <0)[0]
+        print("Degree: {}, neg coeff: {}, neg degree: {}".format(deg, f_bern[
+            neg_idx], neg_idx))
             # plot_bezier(f_bern, -1, 1)
     print(deg)
 
@@ -237,3 +239,7 @@ def plot_energy(V):
     plt.contourf(X, Y, E)
     plt.colorbar()
     plt.savefig("Energy.png")
+
+
+if __name__ == '__main__':
+    check_coeff_positivity()
