@@ -88,8 +88,8 @@ def sos_cubic_lyapunov(alpha = 0.5):
     return result.GetSolution(V), result.GetSolution(Vdot), x
 
 
-def cubic_lyapunov(deg, alpha=.1, eps=1e-3):
-    # \dot x = -x + x^3
+def cubic_lyapunov(deg, alpha=.1, x0=[0], eps=1e-3):
+    # \dot x = -x + x^3/4
     f = np.array([0, -1, 0, 1/4])
     # \dot x = x - 4 * x^3
     # f = np.array([0, 1, 0, -4])
@@ -113,7 +113,9 @@ def cubic_lyapunov(deg, alpha=.1, eps=1e-3):
     x_square = np.array([0, 0, 1])
     LHS_V = bernstein_add(V, -eps*power_to_bernstein_poly(x_square))
 
-    prog.AddLinearConstraint(V[Z] == 0)
+    # prog.AddLinearConstraint(V[Z] == 0)
+    V0 = BezierSurface(x0, V)
+    prog.AddLinearConstraint(V0 == 0)
     prog.AddLinearConstraint(ge(LHS_V, 0))
     # Exponential stability with rate alpha
     LHS = bernstein_add(Vdot, alpha * V)
@@ -193,8 +195,8 @@ def main_lyapunov():
     Vdot = bernstein_mul(dVdx[0], f_bern[0])
     V *= 1e3
     Vdot *= 1e3
-    plot_bezier(V, -1, 1, label='V')
-    plot_bezier(Vdot, -1, 1, label='Vdot')
+    plot_bezier(V, -2, 2, label='V')
+    plot_bezier(Vdot, -2, 2, label='Vdot')
     plt.legend()
     plt.savefig("lyapnov.png")
 
@@ -211,11 +213,13 @@ def plot_sos(V, x, x_lo, x_up, label="f(x)"):
 
 
 if __name__ == '__main__':
-    # main_lyapunov()
-    V, Vdot, x = sos_cubic_lyapunov(0)
-    plot_sos(V, x, -1, 1, label="V")
-    plot_sos(Vdot, x, -1, 1, label="Vdot")
-    plt.savefig("sos.png")
+    # f = lambda x, u: -(x+2)/4 + ((x+2)/4) ** 3/4
+    # check_poly_coeff_matrix(f) 
+    main_lyapunov()
+    # V, Vdot, x = sos_cubic_lyapunov(0)
+    # plot_sos(V, x, -1, 1, label="V")
+    # plot_sos(Vdot, x, -1, 1, label="Vdot")
+    # plt.savefig("sos.png")
     # V, f_bern = pendulum_lyapunov(4 * np.ones(3, dtype=int), [2, 2, 2],alpha=0)
     # V *=1e3
     # plot_energy(V)

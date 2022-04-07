@@ -8,6 +8,9 @@ from pydrake.all import (Variable, Variables, Polynomial)
 
 def power_to_bernstein_poly(X):
     # The different interval other than [0,1] has impact on this function.
+    # We deal with the general interval by first normalizing the variable to be 
+    # in [0, 1], use check_poly_coeff_matrix to find the corresponding coefficients
+    # in monomial basis.
     N = np.array(X.shape) - 1
     num_var = len(N)
     Z = np.zeros(num_var, dtype=int)  # multi-index with all 0's
@@ -171,9 +174,7 @@ def BezierSurface(x, K):
     return p
 
 
-def check_poly_coeff_matrix():
-    f = lambda x, u: (x + 1) / 2 - 4 * ((x + 1) / 2) ** 3 - (u + 1) / 2
-    l = lambda x, u: ((x + 1) / 2) ** 2 + ((u + 1) / 2) ** 2
+def check_poly_coeff_matrix(f):
     # f = lambda x, u: x - 4 * x ** 3 - u
     # l = lambda x, u: x ** 2 + u ** 2
 
@@ -182,7 +183,6 @@ def check_poly_coeff_matrix():
     xu = Variables([x, u])
 
     print(Polynomial(f(x, u), xu).monomial_to_coefficient_map())
-    print(Polynomial(l(x, u), xu).monomial_to_coefficient_map())
 
 
 def check_coeff_positivity():
