@@ -3,7 +3,7 @@ from scipy.special import comb
 import itertools
 import matplotlib.pyplot as plt
 
-from pydrake.all import (Variable, Variables, Polynomial)
+from pydrake.all import (Variable, Variables, Polynomial, MakeVectorVariable)
 
 
 def power_to_bernstein_poly(X):
@@ -162,19 +162,19 @@ def BernsteinPolynomial(t, i, n, lo=0, up=1):
 
 # a multi-dimensional Bezier surface in the variables x with degrees K.shape-1
 # (and coefficients K).
-def BezierSurface(x, K):
+def BezierSurface(x, K, lo=0, up=1):
     assert len(x) == len(K.shape)
     it = np.nditer(K, flags=['multi_index', 'refs_ok'])
     p = 0
     for k in it:
         b = np.copy(k)
         for dim, idx in enumerate(it.multi_index):
-            b *= BernsteinPolynomial(x[dim], idx, K.shape[dim]-1)
+            b = b*BernsteinPolynomial(x[dim], idx, K.shape[dim]-1, lo=0, up=1)
         p += b
     return p
 
 
-def check_poly_coeff_matrix(f):
+def check_1d_poly_coeff_matrix(f):
     # f = lambda x, u: x - 4 * x ** 3 - u
     # l = lambda x, u: x ** 2 + u ** 2
 
@@ -185,12 +185,32 @@ def check_poly_coeff_matrix(f):
     print(Polynomial(f(x, u), xu).monomial_to_coefficient_map())
 
 
+def check_poly_coeff_matrix(f, x_dim):
+    x = MakeVectorVariable(x_dim, "x")
+    print(Polynomial(f(x), x).monomial_to_coefficient_map())
+
+
+def bernstein_to_monomial(X):
+    x_dim = len(X.shape)
+    x = MakeVectorVariable(x_dim, "x")
+    monomial = Polynomial(BezierSurface(x, X))
+    print(monomial)
+    return monomial
+
+
 def check_coeff_positivity():
-    # f(x) = (x-0.2)^2
-    f = np.array([0.04, -0.4, 1])
+    # f(x) = (x-1)^2
+    # f = np.array([1, -2, 1])
+    # f(x,y) = x^2 + (y-1)^2 + z^2
+    f = np.zeros([3, 3, 3])
+    f[0, 0, 0] = 1
+    f[2, 0, 0] = 1
+    f[0, 2, 0] = 1
+    f[0, 1, 0] = -2
+    f[0, 0, 2] = 1
 
     f_bern = power_to_bernstein_poly(f)
-    deg = len(f_bern) - 1
+    deg = np.array(f_bern.shape) - 1
     while (f_bern < 0).any():
         f_bern = bernstein_degree_elevation(f_bern, np.array([1]))
         deg += 1
@@ -224,10 +244,10 @@ def plot_bezier(f_bern, x_lo, x_up, label="f(x)"):
     # plt.show()
 
 
-def plot_energy(V):
+def plot_energy(V, x_lo=-1, x_up=1, name="V"):
     n_points = 51
-    theta = np.linspace(-np.pi, np.pi, n_points)
-    thetadot = np.linspace(-10, 10, n_points)
+    theta = np.linspace(x_lo, x_up, n_points)
+    thetadot = np.linspace(x_lo, x_up, n_points)
 
     E = np.zeros([n_points, n_points])
     for i in range(n_points):
@@ -236,9 +256,13 @@ def plot_energy(V):
             td = thetadot[j]
             E[i, j] = BezierSurface(np.array([np.sin(t), np.cos(t), td]), V)
     [X, Y] = np.meshgrid(theta, thetadot)
-    plt.contourf(X, Y, E)
+    plt.figure()
+    plt.xlabel("theta")
+    plt.ylabel("theta dot")
+    plt.contourf(X, Y, E.T)
+    plt.title(name)
     plt.colorbar()
-    plt.savefig("Energy.png")
+    plt.savefig("{}.png".format(name))
 
 
 if __name__ == '__main__':
