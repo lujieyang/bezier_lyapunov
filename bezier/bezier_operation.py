@@ -244,21 +244,24 @@ def plot_bezier(f_bern, x_lo, x_up, label="f(x)"):
     # plt.show()
 
 
-def plot_energy(V, x_lo=-1, x_up=1, name="V"):
+def plot_energy(V, x_lo=-1, x_up=1, name="V", x2z=None):
     n_points = 51
-    theta = np.linspace(x_lo, x_up, n_points)
-    thetadot = np.linspace(x_lo, x_up, n_points)
+    x1 = np.linspace(x_lo, x_up, n_points)
+    x2 = np.linspace(x_lo, x_up, n_points)
 
     E = np.zeros([n_points, n_points])
     for i in range(n_points):
-        t = theta[i]
+        t = x1[i]
         for j in range(n_points):
-            td = thetadot[j]
-            E[i, j] = BezierSurface(np.array([np.sin(t), np.cos(t), td]), V)
-    [X, Y] = np.meshgrid(theta, thetadot)
+            td = x2[j]
+            z = np.array([t, td])
+            if x2z is not None:
+                z = x2z(t, td)
+            E[i, j] = BezierSurface(z, V)
+    [X, Y] = np.meshgrid(x1, x2)
     plt.figure()
-    plt.xlabel("theta")
-    plt.ylabel("theta dot")
+    plt.xlabel("x1")
+    plt.ylabel("x2")
     plt.contourf(X, Y, E.T)
     plt.title(name)
     plt.colorbar()
