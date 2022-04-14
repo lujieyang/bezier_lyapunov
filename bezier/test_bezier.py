@@ -1,6 +1,7 @@
 import bezier_operation 
 import numpy as np
 import unittest
+from pydrake.all import (Variable, Polynomial)
 
 class TestBezier(unittest.TestCase):
     def test_power_conversion(self):
@@ -34,9 +35,9 @@ class TestBezier(unittest.TestCase):
         np.testing.assert_allclose(mul, power_mul_bern)
 
     def test_bernstein_add(self):
-        p1 = np.array([1, 2, 3, 4])
-        p2 = np.zeros(3)
-        # p2 = np.array([9, 5, 1])
+        p1 = np.random.random(6)
+        # p2 = np.zeros(3)
+        p2 = np.random.random(4)
         power_add = np.polyadd(np.flip(p1), np.flip(p2))
 
         p1_bern = bezier_operation.power_to_bernstein_poly(p1)
@@ -45,6 +46,27 @@ class TestBezier(unittest.TestCase):
 
         add = bezier_operation.bernstein_add(p1_bern, p2_bern)
         np.testing.assert_allclose(add, power_add_bern)
+
+    def test_bernstein_degree_reduction(self):
+        p1 = np.array([1, 2, 3, 4])
+        power_red = np.array([2])
+        p1_elev = bezier_operation.bernstein_degree_elevation(p1, power_red)
+
+        p1_red =bezier_operation.bernstein_degree_reduction(p1_elev, power_red)
+        # np.testing.assert_allclose(p1, p1_red)
+
+    def test_bernstein_degree_elevation(self):
+        p1 = np.array([1, 2, 3, 4])
+        power_elev = np.array([2])
+        p1_elev = bezier_operation.bernstein_degree_elevation(p1, power_elev)
+
+        p1_val = bezier_operation.BezierSurface([0.1], p1)
+        p1_elev_val = bezier_operation.BezierSurface([0.1], p1_elev)
+        x = Variable("x")
+        print("\n")
+        print("monomial:", Polynomial(bezier_operation.BezierSurface([x], p1)))
+        print("degree elevation {}:".format(power_elev),Polynomial(bezier_operation.BezierSurface([x], p1_elev)))
+        # np.testing.assert_allclose(p1_val, p1_elev_val)
 
     def test_bernstein_derivative(self):
         p = np.array([9, 5, 1])

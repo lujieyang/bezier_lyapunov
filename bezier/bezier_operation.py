@@ -55,6 +55,7 @@ def bernstein_add(F, G):
 
 
 def bernstein_degree_elevation(F, E):
+    # E np.ndarray
     N = np.array(F.shape) - 1
     num_var = len(N)
     Z = np.zeros(num_var, dtype=int) # multi-index with all 0's
@@ -70,6 +71,27 @@ def bernstein_degree_elevation(F, E):
             K_L = tuple(np.array(K) - np.array(L))
             N_E = tuple(np.array(N) + np.array(E))
             HK += bernstein_comb(N, L) * bernstein_comb(E, K_L) / bernstein_comb(N_E, K) * F[L]
+        H[K] = HK
+    return H
+
+
+def bernstein_degree_reduction(F, E):
+    # TODO: fix for use, hasn't gone through test yet
+    N = np.array(F.shape) - 1
+    num_var = len(N)
+    Z = np.zeros(num_var, dtype=int) # multi-index with all 0's
+    dtype = type(F[tuple(Z)])
+    H = np.zeros(N - E + 1, dtype=dtype)
+    S = construct_S(Z, N - E)
+    for K in S:
+        Ls = construct_S(Z, K)
+        HK = 0
+        for L in Ls:
+            K_L_E_1 = tuple(np.array(K) - np.array(L) + np.array(E) - 1)
+            E_1 = tuple(np.array(E) - 1)
+            N_E = tuple(np.array(N) - np.array(E))
+            neg_ones = (-1)** np.sum(np.array(K) - np.array(L))
+            HK += bernstein_comb(N, L) * bernstein_comb(K_L_E_1, E_1) / bernstein_comb(N_E, K) * F[L] * neg_ones
         H[K] = HK
     return H
 
