@@ -4,6 +4,7 @@ from bezier_operation import *
 from pydrake.all import (MathematicalProgram, Variable, ge, CommonSolverOption,
                          Solve, SolverOptions, Variables, Polynomial, le, eq)
 from pydrake.examples.quadrotor import QuadrotorPlant
+from pydrake.examples.pendulum import PendulumParams
 import pydrake.symbolic as sym
 import matplotlib.pyplot as plt
 
@@ -118,10 +119,12 @@ def van_der_pol_control_lyapunov(deg, alpha=0, eps=1e-3):
     return V_opt, f_bern
 
 
-def pendulum_control_lyapunov(deg, eps=1e-3):
+def pendulum_control_lyapunov(deg, u_deg, u_lim=1, alpha=0, eps=1e-3, td_scale=1):
     # Swing up the pendulum
-    # [s, c, theta_dot]
-    b = 0.1
+    # [s, (c+1)/2, -theta_dot/td_scale]
+
+    p = PendulumParams()
+
     x0 = [0, 1, 0]
     x_dim = 3
     u_dim = 1
@@ -129,15 +132,17 @@ def pendulum_control_lyapunov(deg, eps=1e-3):
     f2 = np.zeros([2, 1, 2])
     f3 = np.zeros([2, 1, 2])
     
-    f1[0, 1, 1] = 1
-    f2[1, 0, 1] = -1
-    f3[1, 0, 0 ] = 1  # Upward is the positive axis
-    f3[0, 0, 1] = -b
+    f1[0, 1, 1] = -2 * td_scale
+    f1[0, 0, 1] = td_scale
+    f2[1, 0, 1] = td_scale/2
+    f3[0, 0, 0] = u_lim/(2*p.mass() * p.length()**2 * td_scale) # Constant term coming from shifting u
+    f3[1, 0, 0 ] = -p.gravity()/(td_scale * p.length())  # Upward is the positive axis
+    f3[0, 0, 1] = p.damping()/(p.mass() * p.length()**2)
     g = np.zeros([x_dim, u_dim], dtype=np.ndarray)
     for i in range(x_dim):
         for j in range(u_dim):
             g[i, j] = np.zeros([1, 1, 1])
-    g[2, 0][0, 0, 0] = 1
+    g[2, 0][0, 0, 0] = 1/(2*u_lim*p.mass() * p.length()**2 * td_scale) 
 
     num_V_degrees = np.array(deg)
     num_var = len(num_V_degrees)
@@ -148,8 +153,9 @@ def pendulum_control_lyapunov(deg, eps=1e-3):
     # tensor, so vectorize the tensor
     V = np.array(V_var).reshape(num_V_degrees + 1)
 
-    u = prog.NewContinuousVariables(u_dim, "u")
-    prog.AddConstraint(u.dot(u) <= 1)
+    u_var = prog.NewContinuousVariables(u_dim * np.product(u_deg+1), "u")
+    u = u_var.reshape(np.concatenate(([u_dim], u_deg + 1)))
+    # prog.AddConstraint(u.dot(u) <= 1)
 
     dVdx = bernstein_derivative(V)
 
@@ -158,36 +164,55 @@ def pendulum_control_lyapunov(deg, eps=1e-3):
     for dim in range(num_var):
         LfV = bernstein_add(LfV, bernstein_mul(dVdx[dim], f_bern[dim], dtype=Variable))
 
-    # Extract LgM matrix
     LgV = np.zeros(u_dim, dtype=np.ndarray)
-    LgM = np.zeros(LfV.size, dtype=np.ndarray)
-    LfV_deg = np.array(LfV.shape) - 1
-    LfV_flatten = LfV.flatten()
+    LgVu = np.zeros(np.ones(num_var, dtype=int))
     for j in range(u_dim):
         LgV[j] = np.zeros(np.ones(num_var, dtype=int))
         for i in range(x_dim):
             g_bern = power_to_bernstein_poly(g[i, j])
             LgV[j] = bernstein_add(LgV[j], bernstein_mul(dVdx[i], g_bern, dtype=Variable))
-        LgV_deg = np.array(LgV[j].shape) - 1
-        LgV_flatten = bernstein_degree_elevation(LgV[j], LfV_deg - LgV_deg).flatten()
-        for k in range(len(LgV_flatten)):
-            lgv = LgV_flatten[k]
-            LgM[k] = np.zeros([u_dim, d])
-            variables, map_var_to_index = sym.ExtractVariablesFromExpression(lgv)
-            M, v = sym.DecomposeAffineExpression(lgv, map_var_to_index)
-            for m in range(len(variables)):
-                LgM[k][j, variables[m].get_id()-1] = M[m]
+        LgVu = bernstein_add(LgVu, bernstein_mul(LgV[j], u[j], dtype=Variable))
+
+    Vdot = bernstein_add(LfV, LgVu)
+    LHS = bernstein_add(Vdot, alpha * V)
+
+    neg_constraint = le(LHS, 0)
+    # TODO: remove after Drake handles formula True
+    for c in neg_constraint.flatten():
+        if len(c.GetFreeVariables()) > 0:
+            prog.AddConstraint(c)
+
+
+    # # Extract LgM matrix
+    # LgV = np.zeros(u_dim, dtype=np.ndarray)
+    # LgM = np.zeros(LfV.size, dtype=np.ndarray)
+    # LfV_deg = np.array(LfV.shape) - 1
+    # LfV_flatten = LfV.flatten()
+    # for j in range(u_dim):
+    #     LgV[j] = np.zeros(np.ones(num_var, dtype=int))
+    #     for i in range(x_dim):
+    #         g_bern = power_to_bernstein_poly(g[i, j])
+    #         LgV[j] = bernstein_add(LgV[j], bernstein_mul(dVdx[i], g_bern, dtype=Variable))
+    #     LgV_deg = np.array(LgV[j].shape) - 1
+    #     LgV_flatten = bernstein_degree_elevation(LgV[j], LfV_deg - LgV_deg).flatten()
+    #     for k in range(len(LgV_flatten)):
+    #         lgv = LgV_flatten[k]
+    #         LgM[k] = np.zeros([u_dim, d])
+    #         variables, map_var_to_index = sym.ExtractVariablesFromExpression(lgv)
+    #         M, v = sym.DecomposeAffineExpression(lgv, map_var_to_index)
+    #         for m in range(len(variables)):
+    #             LgM[k][j, variables[m].get_id()-1] = M[m]
     
-    # Extract LfM matrix
-    for i in range(len(LfV_flatten)):
-        lfv = LfV_flatten[i]
-        LfM = np.zeros(d)
-        variables, map_var_to_index = sym.ExtractVariablesFromExpression(lfv)
-        M, v = sym.DecomposeAffineExpression(lfv, map_var_to_index)
-        for m in range(len(variables)):
-            LfM[variables[m].get_id()-1] = M[m]
-        # prog.AddConstraint(LfM.dot(V_var) <= np.linalg.norm(LgM[i]@V_var))
-        prog.AddConstraint(LfM.dot(V_var) + V_var.dot(LgM[i].T@u)<=0)
+    # # Extract LfM matrix
+    # for i in range(len(LfV_flatten)):
+    #     lfv = LfV_flatten[i]
+    #     LfM = np.zeros(d)
+    #     variables, map_var_to_index = sym.ExtractVariablesFromExpression(lfv)
+    #     M, v = sym.DecomposeAffineExpression(lfv, map_var_to_index)
+    #     for m in range(len(variables)):
+    #         LfM[variables[m].get_id()-1] = M[m]
+    #     # prog.AddConstraint(LfM.dot(V_var) <= np.linalg.norm(LgM[i]@V_var))
+    #     prog.AddConstraint(LfM.dot(V_var) + V_var.dot(LgM[i].T@u)<=0)
     
 
     x_square = np.zeros([3, 3, 3])
@@ -209,10 +234,31 @@ def pendulum_control_lyapunov(deg, eps=1e-3):
     result = Solve(prog)
     print(result.is_success())
     print(result.get_solver_id().name())
-    V_opt = result.GetSolution(V_var).reshape(num_V_degrees+1)
-    return V_opt
 
-    
+    V_opt = result.GetSolution(V_var).reshape(num_V_degrees+1)
+    u_opt = result.GetSolution(u_var)
+    Vdot_val = np.zeros(Vdot.shape)
+    eval_dict = dict(zip(np.concatenate((V_var, u_var)), np.concatenate((V_opt.flatten(), u_opt))))
+    it = np.nditer(Vdot, flags=['multi_index', 'refs_ok'])
+    for _ in it:
+        idx = it.multi_index
+        Vdot_val[idx] = Vdot[idx].Evaluate(eval_dict)
+
+    return V_opt, u_opt.reshape(u_deg + 1), Vdot_val
+
+def main_pendulum():
+    td_scale = 5
+    V, u_opt, Vdot = pendulum_control_lyapunov(2 * np.ones(3, dtype=int), np.ones(3, dtype=int), u_lim=2, alpha=0.5, td_scale=td_scale)
+    V *=1e3
+
+    np.save("V",V)
+    np.save("u_opt",u_opt)
+
+    bernstein_to_monomial(V)
+    x2z = lambda t, td: np.array([np.sin(t), (2*np.cos(t)+1)/2, -td/td_scale])
+    plot_energy(V, 0, np.pi, 0, td_scale, x2z=x2z)
+    plot_energy(Vdot, 0, np.pi, 0, td_scale, name="Vdot", x2z=x2z)
+
 
 if __name__ == '__main__':
-    pendulum_control_lyapunov(2 * np.ones(3, dtype=int))
+    main_pendulum()

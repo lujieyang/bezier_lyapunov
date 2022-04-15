@@ -266,10 +266,10 @@ def plot_bezier(f_bern, x_lo, x_up, label="f(x)"):
     # plt.show()
 
 
-def plot_energy(V, x_lo=-1, x_up=1, name="V", x2z=None):
+def plot_energy(V, x_lo=-1, x_up=1, y_lo=-1, y_up=1, name="V", x2z=None):
     n_points = 51
     x1 = np.linspace(x_lo, x_up, n_points)
-    x2 = np.linspace(x_lo, x_up, n_points)
+    x2 = np.linspace(y_lo, y_up, n_points)
 
     E = np.zeros([n_points, n_points])
     for i in range(n_points):
