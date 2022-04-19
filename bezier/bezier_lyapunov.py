@@ -1,7 +1,7 @@
 import numpy as np
 from bezier_operation import *
 from pydrake.all import (MathematicalProgram, Variable, ge, CommonSolverOption,
-                         Solve, SolverOptions, Variables, Polynomial, le, eq)
+                         Solve, SolverOptions, Variables, Polynomial, le, RealContinuousLyapunovEquation)
 from pydrake.examples.pendulum import PendulumParams
 import matplotlib.pyplot as plt
 
@@ -13,10 +13,16 @@ def pendulum_lyapunov(deg, l_deg, alpha=0, eps=1e-3):
     f1 = np.zeros([1, 2, 2])
     f2 = np.zeros([2, 1, 2])
     f3 = np.zeros([2, 1, 2])
+    # f1[0, 1, 1] = 1
+    # f2[1, 0, 1] = -1
+    # f3[1, 0, 0 ] = -1
+    # f3[0, 0, 1] = -b
+
+    p = PendulumParams()
     f1[0, 1, 1] = 1
     f2[1, 0, 1] = -1
-    f3[1, 0, 0 ] = -1
-    f3[0, 0, 1] = -b
+    f3[1, 0, 0 ] = -p.gravity()/p.length()
+    f3[0, 0, 1] = -p.damping()/(p.mass() * p.length()**2)
 
     num_V_degrees = np.array(deg)
     num_var = len(num_V_degrees)
@@ -239,7 +245,7 @@ def global_pendulum():
     ax.set_title("V (solid) and Mechanical Energy (dashed)")
 
 
-def van_der_pol_lyapunov(deg, alpha=0, eps=1e-3):
+def van_der_pol_lyapunov(deg, alpha=0, eps=1e-3, r1=1, r2=1):
     # f = [- x1, 
     #       x0 + x0^2 * x1 - x1]
     x0 = [0, 0]
@@ -249,6 +255,11 @@ def van_der_pol_lyapunov(deg, alpha=0, eps=1e-3):
     f2[1, 0] = 1
     f2[2, 1] = 1
     f2[0, 1] = -1
+
+    # f1[0, 1] = -r2/r1
+    # f2[1, 0] = r1/r2
+    # f2[2, 1] = r1**2
+    # f2[0, 1] = -1
 
     num_V_degrees = np.array(deg)
     num_var = len(num_V_degrees)
@@ -291,6 +302,69 @@ def van_der_pol_lyapunov(deg, alpha=0, eps=1e-3):
     print(result.is_success())
     V_opt = result.GetSolution(V_var).reshape(num_V_degrees+1)
     return V_opt, f_bern
+
+def sos_van_der_pol(visualize=False):
+    f = lambda x: [- x[1], x[0] + (x[0]**2 - 1) * x[1]]
+    A = np.array([[0, -1], [1, -1]])
+
+    # rhs of the Lyapunov equation (standard choice)
+    Q = np.eye(2)
+
+    # positive definite matrix of the Lyapunov function
+    P = RealContinuousLyapunovEquation(A, Q)
+    # P = np.eye(2)
+    # initialize optimzation problem
+    prog3 = MathematicalProgram()
+
+    # SOS indeterminates
+    x = prog3.NewIndeterminates(2, 'x')
+
+    # Lyapunov function
+    V = x.dot(P).dot(x)
+    V_dot = 2*x.dot(P).dot(f(x))
+
+    # degree of the polynomial lambda(x)
+    # no need to change it, but if you really want to,
+    # keep l_deg even and do not set l_deg greater than 10
+    l_deg = 4
+    assert l_deg % 2 == 0
+
+    # SOS Lagrange multipliers
+    l = prog3.NewFreePolynomial(Variables(x), l_deg).ToExpression()
+
+    # level set as optimization variable
+    rho = prog3.NewContinuousVariables(1, 'rho')[0]
+
+    # SOS condition described above
+    prog3.AddSosConstraint(x.dot(x)*(V - rho) - l*V_dot)
+
+    # insert here the objective function (maximize rho)
+    prog3.AddLinearCost(-rho)
+
+    # solve SOS program
+    result = Solve(prog3)
+
+    # get maximum rho
+    assert result.is_success()
+    rho_method_3 = result.GetSolution(rho)
+
+    # print maximum rho
+    print(f'Method 3 verified rho = {rho_method_3}.')
+
+    if visualize:
+        n_points = 100
+        x1 = np.linspace(-1.5, 1.5, n_points)
+        x2 = np.linspace(-2, 2, n_points)
+        V_val = np.zeros([n_points, n_points])
+        for i in range(n_points):
+            for j in range(n_points):
+                x = np.array([x1[i], x2[j]])
+                V_val[i,j] = x.T @P @x
+        [X, Y] = np.meshgrid(x1, x2)
+        plt.xlabel("x1")
+        plt.ylabel("x2")
+        plt.contourf(X, Y, V_val.T, [0, rho_method_3], alpha=0.3, colors="red")
+    return P, rho_method_3
 
 
 def sos_cubic_lyapunov(alpha = 0.5):
@@ -443,7 +517,9 @@ def main_pendulum():
 
 
 def main_van_der_pol():
-    V, f_bern = van_der_pol_lyapunov(2 * np.ones(2, dtype=int))
+    r1 = 1.2
+    r2 = 1.5
+    V, f_bern = van_der_pol_lyapunov(2 * np.ones(2, dtype=int), r1=r1, r2=r2)
     V *=1e3
     num_var = len(V.shape)
     dVdx = bernstein_derivative(V)
@@ -452,8 +528,15 @@ def main_van_der_pol():
         Vdot = bernstein_add(Vdot, bernstein_mul(dVdx[dim], f_bern[dim], dtype=Variable))
 
     bernstein_to_monomial(V)
-    plot_energy(V, -2, 2)
-    plot_energy(Vdot, -2, 2, name="Vdot")
+
+    # x2z = lambda x1, x2: np.array([x1/r1, x2/r2])
+    plot_energy(V, -r1, r1, -r2, r2)
+    sos_van_der_pol(True)
+    plt.savefig("van_der_pol.png")
+
+    plot_energy(Vdot, -r1, r1, -r2, r2, name="Vdot")
+    sos_van_der_pol(True)
+    plt.savefig("Vdot_van_der_pol.png")
 
 
 def plot_sos(V, x, x_lo, x_up, label="f(x)"):
@@ -475,4 +558,5 @@ if __name__ == '__main__':
     # plot_sos(V, x, -1, 1, label="V")
     # plot_sos(Vdot, x, -1, 1, label="Vdot")
     # plt.savefig("sos.png")
-    main_cubic()
+    main_pendulum()
+    # sos_van_der_pol()
