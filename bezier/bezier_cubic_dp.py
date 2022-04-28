@@ -3,7 +3,10 @@ from bezier_operation import *
 from pydrake.all import (MathematicalProgram, Variable, ge, CommonSolverOption,
                          Solve, SolverOptions, Variables, Polynomial, le, eq,
                          DiagramBuilder, SymbolicVectorSystem, LogVectorOutput,
-                         Simulator)
+                         Simulator, MosekSolver)
+import pydrake.symbolic as sym
+from pydrake.solvers import mathematicalprogram as mp
+import dreal
 
 def power_matching_dp(deg, extra_deg):
     print("Degree: ", deg)
@@ -60,7 +63,7 @@ def power_matching_dp(deg, extra_deg):
     return J_opt, area
 
 
-def cubic_dp(deg, gamma=0):
+def cubic_dp(deg, gamma=0, adv_set=[]):
     print("Degree: ", deg)
     # f(x) = x - 4 * x^3 - u
     f = np.zeros([4, 2])
@@ -104,15 +107,52 @@ def cubic_dp(deg, gamma=0):
  
     prog.AddLinearCost(-J_int)
 
-    # options = SolverOptions()
-    # options.SetOption(CommonSolverOption.kPrintToConsole, 1)
-    # prog.SetSolverOptions(options)
+    if adv_set != []:
+        for x_adv in adv_set:
+            prog.AddLinearConstraint(BezierSurface([x_adv[0]], np.squeeze(J))>=0)
+            prog.AddLinearConstraint(BezierSurface(x_adv, LHS)>=0)
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
     result = Solve(prog)
     print(result.is_success())
     area = -result.get_optimal_cost()
 
     J_opt = np.squeeze(result.GetSolution(J))
-    return J_opt, area
+    eval_dict = dict(zip(J_var, J_opt.flatten()))
+    LHS_val = np.zeros(LHS.shape)
+    it = np.nditer(LHS, flags=['multi_index', 'refs_ok'])
+    for _ in it:
+        idx = it.multi_index
+        LHS_val[idx] = LHS[idx].Evaluate(eval_dict)
+    return J_opt, area, LHS_val
+
+def smt_check(J, LHS):
+    x = dreal.Variable("x")
+    u = dreal.Variable("u")
+    state_input_constraints = dreal.logical_and(x>=0, x<=1, u>=0, u<=1)
+    J_val = BezierSurface([x], J)
+    LHS_val = BezierSurface([x, u], LHS)
+    config = dreal.Config()
+    # config.use_polytope_in_forall = True
+    # config.use_local_optimization = True
+    config.precision = 1e-8
+    # condition = dreal.logical_and(J_val>=0, LHS_val>=0)
+    condition = dreal.logical_and(dreal.logical_imply(state_input_constraints, J_val>=0), dreal.logical_imply(state_input_constraints, LHS_val>=0))
+    return dreal.CheckSatisfiability(dreal.logical_not(condition), config)
+
+def min_optimization(LHS):
+    prog = MathematicalProgram()
+    xu = prog.NewContinuousVariables(2)
+    prog.AddBoundingBoxConstraint(np.zeros(2)+1e-3, np.ones(2)-1e-3, xu)
+    prog.AddCost(BezierSurface(xu, LHS))
+
+    result = Solve(prog)
+    print(result.is_success())
+    print(result.get_solver_id().name())
+
+    return result.GetSolution(xu), result.get_optimal_cost()
 
 
 def cubic_piecewise_dp(deg, x_con=0.1):
@@ -261,6 +301,69 @@ def cubic_control_affine_dp_lower_bound(deg):
         if len(c.GetFreeVariables()) > 0:
             prog.AddConstraint(c)
 
+    # TODO: Change to AddQuadraticAsRotatedLorentzConeConstraint
+    # Extract the quadratic form explicitly for Drake to use a convex solver
+    # for i in range(len(LHS)):
+    #     poly = sym.Polynomial(LHS[i])
+    #     variables, map_var_to_index = sym.ExtractVariablesFromExpression(-LHS[i])
+    #     Q, b, c = sym.DecomposeQuadraticPolynomial(poly, map_var_to_index)
+    #     # prog.AddLorentzConeConstraint(Q, b, variables)
+
+
+    J_int = bernstein_integral(J)
+    prog.AddLinearCost(-J_int)
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    # solver = MosekSolver()
+    result = Solve(prog)
+    print(result.is_success())
+    print(result.get_solver_id().name())
+
+    J_opt = np.squeeze(result.GetSolution(J))
+    return J_opt, -result.get_optimal_cost()
+
+
+def cubic_control_affine_dp_lower_bound_shift(deg, eps=1e-3, x0=[0]):
+    # Shift the domain of x and u to be in [0,1] and relax the positivity
+    # constraint to be >= -eps.
+    print("Degree: ", deg)
+    f1 = np.array([-0.5, -1, -1.5, -0.5])
+    f2 = np.array([-0.5])
+
+    l1 = np.array([0, 0, 1])
+
+    R = 1
+
+    num_J_degrees = np.array([deg])
+    num_var = len(num_J_degrees)
+    Z = tuple(np.zeros(num_var, dtype=int))
+    prog = MathematicalProgram()
+    J_var = prog.NewContinuousVariables(np.product(num_J_degrees+1),
+                                    "J")  # Drake is not working for tensor, so vectorize the tensor
+    J = np.array(J_var).reshape(num_J_degrees+1)
+
+    dJdx = bernstein_derivative(J)[0]
+
+    f1_bern = power_to_bernstein_poly(f1)
+    f2_bern = power_to_bernstein_poly(f2)
+    l1_bern = power_to_bernstein_poly(l1)
+
+    dJdx_f1 = bernstein_mul(dJdx, f1_bern, dtype=Variable)
+    dJdx_f2 = bernstein_mul(dJdx, f2_bern, dtype=Variable)
+    last_term = -bernstein_mul(dJdx_f2, dJdx_f2, dtype=Variable)/4
+    LHS = bernstein_add(bernstein_add(l1_bern, dJdx_f1), last_term)
+
+    # prog.AddLinearConstraint(J[Z] == 0)
+    J0 = BezierSurface(x0, J)
+    prog.AddLinearConstraint(J0 == 0)
+    prog.AddLinearConstraint(ge(J, -eps))
+    eq_constraint = ge(LHS, 0)
+    for c in eq_constraint.flatten():
+        if len(c.GetFreeVariables()) > 0:
+            prog.AddConstraint(c)
+
     J_int = bernstein_integral(J)
     prog.AddLinearCost(-J_int)
 
@@ -299,8 +402,8 @@ def check_cubic_control_affine_dp(J):
 
 
 def main_dp():
-    degrees = np.arange(2, 32, 4)
-    J = {deg: cubic_control_affine_dp_lower_bound(deg) for deg in degrees}
+    degrees = np.arange(22, 32, 2)
+    J = {deg: cubic_dp(deg) for deg in degrees}
 
     n_breaks = 101
     x_breaks = np.linspace(0, 1, n_breaks)
@@ -313,9 +416,11 @@ def main_dp():
             print(f'degree {deg} failed')
             continue
         label = f'Deg. {deg}'
-        J_plot = [BezierSurface([xi], J[deg][0]) for xi in x_breaks]
+        J_plot = [BezierSurface([xi], J[deg][0], 0, 1) for xi in x_breaks]
         plt.plot(x_breaks, J_plot, label=label)
         print(f'Degree {deg} area under curve = {J[deg][1]}')
+        violation = smt_check(J[deg][0], J[deg][2])
+        print(violation)
     plt.plot(x_opt, J_opt.T, 'k', label='J*')
     plt.xlabel(r'$x$')
     plt.ylabel(r'$v$')
@@ -389,10 +494,27 @@ def optimal_cost_to_go():
     log = logger.FindLog(context)
     return log.sample_times(), log.data()
 
+def iterative_dp():
+    adv_set = []
+    x_opt, J_opt = optimal_cost_to_go()
+    plt.plot(x_opt, J_opt.T, 'k', label='J*')
+    for i in range(100):
+        J, area, LHS = cubic_dp(40, gamma=-1e-3, adv_set=adv_set)
+        if i%10==0:
+            plot_bezier(J, 0, 1, label="iter.{}".format(i))
+            plt.legend()
+            plt.savefig("cubic.png")
+        print("area: ", area)
+        xu, lhs_violation = min_optimization(LHS)
+        if lhs_violation <0:
+            adv_set.append(xu)
+    
 
 if __name__ == '__main__':
-    main_dp()
-    # cubic_control_affine_dp_lower_bound(2)
+    # f = lambda x, u: (x+1)/2 - 4 * ((x+1)/2)**3 - (u+1)/2
+    # check_1d_poly_coeff_matrix(f)
+    # main_dp()
+    iterative_dp()
     # J, _ = cubic_control_affine_dp(24)
     # check_cubic_control_affine_dp(J)
     # main_piecewise_dp()

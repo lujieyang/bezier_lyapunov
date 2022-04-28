@@ -5,7 +5,7 @@ from pydrake.all import (MathematicalProgram, Variable, ge, CommonSolverOption,
                          MosekSolver)
 import pydrake.symbolic as sym
 
-def pendulum_dp(deg):
+def pendulum_control_affine_dp(deg):
     # [s, c, theta_dot]
     b = 0.1
     x0 = [0, 1, 0]
@@ -76,7 +76,65 @@ def pendulum_dp(deg):
     return J_opt, -result.get_optimal_cost()
 
 
+def pendulum_dp(deg, gamma=0):
+    # [s, c, theta_dot]
+    b = 0.1
+    x0 = [0, 1, 0]
+    f1 = np.zeros([1, 2, 2, 1])
+    f2 = np.zeros([2, 1, 2, 1])
+    f3 = np.zeros([2, 1, 2, 2])
+    l = np.zeros([3, 3, 3, 3])
+    f1[0, 1, 1, 0] = 1
+    f2[1, 0, 1, 0] = -1
+    f3[1, 0, 0, 0] = 1
+    f3[0, 0, 1, 0] = -b
+    f3[0, 0, 0, 1] = 1
+    
+
+    num_J_degrees = np.array(deg)
+    num_var = len(num_J_degrees)
+    prog = MathematicalProgram()
+    J_var = prog.NewContinuousVariables(np.product(num_J_degrees + 1),
+                                        "J")  # Drake is not working for
+    # tensor, so vectorize the tensor
+    J = np.array(J_var).reshape(num_J_degrees + 1)
+
+    for ind in 2*np.eye(num_var+1, dtype=int):
+        l[tuple(ind)] = 1
+
+    dJdx = bernstein_derivative(J)
+
+    f_bern = [power_to_bernstein_poly(f) for f in [f1, f2, f3]]
+    l_bern = power_to_bernstein_poly(l)
+
+    dJdx_f = power_to_bernstein_poly(np.zeros(np.ones(num_var+1, dtype=int)))
+    for dim in range(num_var):
+        dJdx_f = bernstein_add(dJdx_f, bernstein_mul(np.expand_dims(dJdx[dim], axis=-1), f_bern[dim], dtype=Variable))
+
+    LHS = bernstein_add(l_bern, dJdx_f)
+
+    J0 = BezierSurface(x0, J)
+    prog.AddLinearConstraint(J0 == 0)
+    # prog.AddLinearConstraint(ge(J_var, 0))
+
+    eq_constraint = ge(LHS, gamma)
+    for c in eq_constraint.flatten():
+        if len(c.GetFreeVariables()) > 0:
+            prog.AddConstraint(c)
+    
+    J_int = bernstein_integral(J)
+    prog.AddLinearCost(-J_int)
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    print(result.is_success())
+    J_opt = np.squeeze(result.GetSolution(J_var)).reshape(num_J_degrees+1)
+    return J_opt, -result.get_optimal_cost()
+
 if __name__ == '__main__':
-    J, _ = pendulum_dp(4 * np.ones(3, dtype=int))
+    deg = 10
+    J, _ = pendulum_dp(deg * np.ones(3, dtype=int), gamma=-10)
     x2z = lambda t, td: np.array([np.sin(t), np.cos(t), td])
-    plot_energy(J, name="J", x2z=x2z)
+    plot_energy(J, name="J deg:{}".format(deg), x2z=x2z)
