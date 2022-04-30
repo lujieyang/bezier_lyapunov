@@ -27,15 +27,16 @@ def p(a, b):
 def bezier_to_sos():
     # Check the other way around: if sos can represent all bezier surfaces with nonnegative coefficients.
     prog = MathematicalProgram()
-    num_var = 2
-    deg = 2
+    num_var = 1
+    deg = 8
     x = prog.NewIndeterminates(num_var, "x")
     f = prog.NewFreePolynomial(Variables(x), deg).ToExpression()
     
     S_procedure = 0
+    lam_deg = 4
     for i in range(num_var):
-        lam = prog.NewFreePolynomial(Variables(np.array([x[i]])), deg).ToExpression()
-        S_procedure = lam * ((x[i]-0.5)**2-0.5)
+        lam = prog.NewSosPolynomial(Variables(np.array([x[i]])), lam_deg)[0].ToExpression()
+        S_procedure += lam * ((x[i]-0.5)**2-0.5)
     prog.AddSosConstraint(f + S_procedure)
 
     F_deg = (deg+1) * np.ones(num_var, dtype=int)
@@ -50,6 +51,9 @@ def bezier_to_sos():
     result = Solve(prog)
     print(result.is_success())
 
+    if not result.is_success():
+        plot_bezier(F, 0, 1)
+        plt.savefig("SOS compare.png")
 
 if __name__ == '__main__':
     bezier_to_sos()
