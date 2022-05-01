@@ -157,7 +157,7 @@ def fitted_value_iteration_drake(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
 
         coeff = result.GetSolution(J_coeff_var).reshape(coeff_shape)
         print("Diff: ", np.linalg.norm(coeff-old_coeff))
-        if np.allclose(coeff, old_coeff):
+        if np.allclose(coeff, old_coeff, atol=1e-3):
             plot_value_function(coeff, params_dict, poly_func, deg, dt, poly_type, DRAKE)
             return coeff
 
@@ -174,7 +174,7 @@ def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
     mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
     mesh_pts[int(np.floor(n_mesh/2))] = 0
     coeff_shape = np.ones(params_dict["nz"], dtype=int) * (poly_deg + 1)
-    old_coeff = np.zeros(coeff_shape)
+    old_coeff = np.load("pendulum_swingup/data/{}/{}/J_{}_{}.npy".format(DRAKE, poly_type, deg, dt)) #np.zeros(coeff_shape)
     x2z = params_dict["x2z"]
     f = params_dict["f"]
     f_x = params_dict["f_x"]
@@ -240,6 +240,29 @@ def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
             old_coeff = coeff
 
     return coeff
+
+
+def fit_barycentric_fvi(poly_deg, params_dict):
+    n_mesh = 51
+    mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
+    mesh_pts[int(np.floor(n_mesh/2))] = 0
+    coeff_shape = np.ones(params_dict["nz"], dtype=int) * (poly_deg + 1)
+    x2z = params_dict["x2z"]
+    poly_func = lambda t, i, n: monomial(t, i, n)
+    Z = []
+    Jd = np.load("pendulum_swingup/data/J.npy")
+
+    for i in range(n_mesh):     
+        theta = mesh_pts[i, 0]  
+        for j in range(n_mesh):
+            thetadot = mesh_pts[j, 1]
+            x = np.array([theta, thetadot])
+            z = x2z(x)
+            basis = calc_basis(z, coeff_shape, poly_func)
+            Z.append(basis)
+    J = np.linalg.lstsq(Z, Jd.flatten())[0].reshape(coeff_shape)
+    plot_value_function(J, params_dict, poly_func, deg, dt, poly_type)
+    np.save("pendulum_swingup/data/{}/{}/J_{}_{}.npy".format(method, poly_type, deg, dt), J)
 
 
 def plot_value_function(coeff, params_dict, poly_func, deg, dt, poly_type=MONOMIAL, method=LSTSQ):
@@ -331,7 +354,7 @@ if __name__ == '__main__':
     method = DRAKE
     poly_type = MONOMIAL
     params_dict = pendulum_setup(poly_type)
-    deg = 2
+    deg = 3
     dt = 0.01
     if method == LSTSQ:
         J = fitted_value_iteration_lstsq(deg, params_dict, poly_type, dt=dt, gamma=.9, old_target=False)
