@@ -182,7 +182,7 @@ def plot_value_function(coeff, params_dict, poly_func, deg, dt):
             extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("figures/fvi/fvi_pendulum_swingup_{}_{}.png".format(deg, dt))
+    plt.savefig("figures/fvi/integration/fvi_pendulum_swingup_{}_{}.png".format(deg, dt))
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -194,13 +194,13 @@ def plot_value_function(coeff, params_dict, poly_func, deg, dt):
             extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("figures/fvi/fvi_pendulum_swingup_policy_{}_{}.png".format(deg, dt))
+    plt.savefig("figures/fvi/integration/fvi_pendulum_swingup_policy_{}_{}.png".format(deg, dt))
 
 
 if __name__ == '__main__':
     poly_deg = 2
-    dt = 0.01
+    dt = 0.1
     params_dict = pendulum_setup()
     J = fitted_value_iteration(poly_deg, params_dict, dt)
 
-    np.save("pendulum_swingup/J_{}_{}.npy".format(poly_deg, dt), J)
+    np.save("pendulum_swingup/data/integration/J_{}_{}.npy".format(poly_deg, dt), J)

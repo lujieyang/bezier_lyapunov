@@ -97,7 +97,7 @@ def hermite_polynomial(x, n, d):
     return v
 
 
-def fitted_value_iteration_drake(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0.1, gamma=1):
+def fitted_value_iteration_drake(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0.1, gamma=1, old_target=True):
     n_mesh = 51
     mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
     mesh_pts[int(np.floor(n_mesh/2))] = 0
@@ -136,8 +136,12 @@ def fitted_value_iteration_drake(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
                 x_next = f_x(x, u_opt) * dt + x
                 z_next = x2z(x_next)
                 # z_next = f(z, u_opt) * dt + z
-                J_target = l(z, u_opt) * dt + gamma * calc_value_function(z_next,
-                                                                  J_coeff, poly_func)                                 
+                if old_target:
+                    J_target = l(z, u_opt) * dt + gamma * calc_value_function(z_next,
+                                                                  old_coeff, poly_func) 
+                else:
+                    J_target = l(z, u_opt) * dt + gamma * calc_value_function(z_next,
+                                                                    J_coeff, poly_func)                                 
                 J = calc_value_function(z, J_coeff, poly_func)
 
                 prog.AddLinearConstraint(J >= 0)
@@ -165,8 +169,8 @@ def fitted_value_iteration_drake(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
     return coeff
 
 
-def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0.1, gamma=1):
-    n_mesh = 101
+def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0.1, gamma=1, old_target=True):
+    n_mesh = 51
     mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
     mesh_pts[int(np.floor(n_mesh/2))] = 0
     coeff_shape = np.ones(params_dict["nz"], dtype=int) * (poly_deg + 1)
@@ -212,16 +216,21 @@ def fitted_value_iteration_lstsq(poly_deg, params_dict, poly_type=CHEBYSHEV,dt=0
                 if poly_type != MONOMIAL and poly_type != HERMITE:
                     z_next = np.clip(z_next, -1, 1)
 
-                l_target.append(l(z, u_opt) * dt)
-                # J_target.append(l(z, u_opt) * dt + gamma * old_coeff.flatten().dot(calc_basis(z_next, coeff_shape, poly_func)))
-                Z_next.append(calc_basis(z_next, coeff_shape, poly_func))                             
+                if old_target:
+                    J_target.append(l(z, u_opt) * dt + gamma * old_coeff.flatten().dot(calc_basis(z_next, coeff_shape, poly_func)))
+                else:
+                    l_target.append(l(z, u_opt) * dt)
+                    Z_next.append(calc_basis(z_next, coeff_shape, poly_func))                             
                 
         if iter == 0:
             Z = np.array(Z)
-        J_target = np.array(J_target)
-        Z_next = np.array(Z_next)
-        coeff = np.linalg.lstsq((Z-gamma *Z_next), l_target)[0].reshape(coeff_shape)
-        # coeff = np.linalg.lstsq(Z, J_target)[0].reshape(coeff_shape)
+        if old_target:
+            J_target = np.array(J_target)
+            coeff = np.linalg.lstsq(Z, J_target)[0].reshape(coeff_shape)
+        else:
+            Z_next = np.array(Z_next)
+            coeff = np.linalg.lstsq((Z-gamma *Z_next), l_target)[0].reshape(coeff_shape)
+        
         
         if np.allclose(coeff, old_coeff):
             plot_value_function(coeff, params_dict, poly_func, deg, dt, poly_type)
@@ -325,8 +334,8 @@ if __name__ == '__main__':
     deg = 2
     dt = 0.01
     if method == LSTSQ:
-        J = fitted_value_iteration_lstsq(deg, params_dict, poly_type, dt=dt, gamma=.9)
+        J = fitted_value_iteration_lstsq(deg, params_dict, poly_type, dt=dt, gamma=.9, old_target=False)
     elif method == DRAKE:
-        J = fitted_value_iteration_drake(deg, params_dict, poly_type, dt=dt, gamma=.999)
+        J = fitted_value_iteration_drake(deg, params_dict, poly_type, dt=dt, gamma=.999, old_target=False)
         
-    np.save("pendulum_swingup/{}/{}/J_{}_{}.npy".format(method, poly_type, deg, dt), J)
+    np.save("pendulum_swingup/data/{}/{}/J_{}_{}.npy".format(method, poly_type, deg, dt), J)
