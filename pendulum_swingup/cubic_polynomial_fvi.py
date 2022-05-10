@@ -84,7 +84,6 @@ def nonconvex_hjb_regression(poly_deg, params_dict):
 
 def convex_sampling_hjb_lower_bound(poly_deg, params_dict):
     # Sample for nonnegativity constraint of HJB RHS
-    # TODO: Try when ParseQuadraticAsRotatedLorentzConeConstraint gets updated
     nz = params_dict["nz"]
     coeff_shape = np.ones(nz, dtype=int) * (poly_deg + 1)
     f = params_dict["f"]
@@ -113,12 +112,11 @@ def convex_sampling_hjb_lower_bound(poly_deg, params_dict):
         variables, map_var_to_index = sym.ExtractVariablesFromExpression(
             constr)
         Q, b, c = sym.DecomposeQuadraticPolynomial(poly, map_var_to_index)
-        if (np.linalg.eigvals(Q) >= 0).all():
-            try:
-                prog.AddQuadraticAsRotatedLorentzConeConstraint(
-                    Q, b, c, variables)
-            except:
-                pass
+        try:
+            prog.AddQuadraticAsRotatedLorentzConeConstraint(
+                Q, b, c, variables, psd_tol=1e-5)
+        except:
+            pass
 
     obj = Polynomial(calc_value_function(z, J_coeff, poly_func))
     for i in range(nz):
@@ -390,11 +388,11 @@ if __name__ == '__main__':
     x_opt, J_opt = optimal_cost_to_go()
     for poly_deg in range(2, 12, 2):
         print("Deg: ", poly_deg)
-        iterative_hjb_sampling_regression(poly_deg, params_dict)
+        convex_sampling_hjb_lower_bound(poly_deg, params_dict)
         # fit_optimal_cost_to_go(poly_deg, J_opt, x_opt, params_dict)
         # J, u, z, = iterative_hjb_sos_lower_bound(poly_deg, params_dict)
         # plot_value_function_sos(J, u, z, poly_deg)
 
     plt.plot(x_opt, J_opt.T, 'k', label='J*')
     plt.legend()
-    plt.savefig("J_iterative_hjb_regression.png")
+    plt.savefig("J_convex_sampling_hjb_lower_bound.png")
