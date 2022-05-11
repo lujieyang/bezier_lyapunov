@@ -1,4 +1,5 @@
 import time
+from pendulum_swingup.polynomial_integration_fvi import plot_value_function_sos
 from utils import *
 from polynomial_integration_fvi import pendulum_setup
 from pydrake.all import (MakeVectorVariable, Solve, SolverOptions, CommonSolverOption, Polynomial, Variables)
@@ -10,10 +11,10 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 
 
-def convex_sampling_hjb_lower_bound(poly_deg, params_dict):
+def convex_sampling_hjb_lower_bound(deg, params_dict):
     # Sample for nonnegativity constraint of HJB RHS
     nz = params_dict["nz"]
-    coeff_shape = np.ones(nz, dtype=int) * (poly_deg + 1)
+    coeff_shape = np.ones(nz, dtype=int) * (deg + 1)
     f = params_dict["f"]
     l = params_dict["l"]
     f2 = params_dict["f2"]
@@ -23,12 +24,11 @@ def convex_sampling_hjb_lower_bound(poly_deg, params_dict):
     def poly_func(x, n): return x**n  # monomial(x, n)
 
     prog = MathematicalProgram()
-    J_coeff_var = prog.NewContinuousVariables(np.product(coeff_shape),
-                                              "J")
-    J_coeff = np.array(J_coeff_var).reshape(coeff_shape)
-
     z = prog.NewIndeterminates(nz, "z")
-    dJdz = calc_dJdz(z, J_coeff, poly_func)
+    J = prog.NewFreePolynomial(Variables(z), deg)
+    J_expr = J.ToExpression()
+    
+    dJdz = J_expr.Jacobian(z)
     u_opt = calc_u_opt(dJdz, f2, params_dict["Rinv"])
 
     RHS = -(l(z, u_opt) + dJdz.dot(f(z, u_opt)))
@@ -45,8 +45,7 @@ def convex_sampling_hjb_lower_bound(poly_deg, params_dict):
             x = np.array([theta, thetadot])
             z_val = x2z(x)
             z_val[np.abs(z_val)<=1e-6] = 0
-            prog.AddLinearConstraint(
-                calc_value_function(z_val, J_coeff, poly_func) >= 0)
+            prog.AddLinearConstraint(J_expr.EvaluatePartial(dict(zip(z, z_val))) >= 0)
             constr = RHS.EvaluatePartial(dict(zip(z, z_val)))
             poly = Polynomial(constr)
             poly = poly.RemoveTermsWithSmallCoefficients(1e-6)
@@ -61,13 +60,13 @@ def convex_sampling_hjb_lower_bound(poly_deg, params_dict):
     end_time = time.time()
     print("Time for adding constraints: ", end_time-start_time)
 
-    # obj = Polynomial(calc_value_function(z, J_coeff, poly_func))
+    # obj = J
     # for i in range(nz):
     #     obj = obj.Integrate(z[i], z_min[i], z_max[i])
     # prog.AddCost(-obj.ToExpression())
 
     # J(z0) = 0
-    J0 = calc_value_function(params_dict["z0"], J_coeff, poly_func)
+    J0 = J_expr.EvaluatePartial(dict(zip(z, params_dict["z0"])))
     prog.AddLinearConstraint(J0 == 0)
     options = SolverOptions()
     options.SetOption(CommonSolverOption.kPrintToConsole, 1)
@@ -79,7 +78,7 @@ def convex_sampling_hjb_lower_bound(poly_deg, params_dict):
     solve_end = time.time()
     print("Time for solving: ", solve_end-solve_start)
 
-    J_star = result.GetSolution(J_coeff_var).reshape(coeff_shape)
+    J_star = result.GetSolution(J)
 
     # assert result.is_success()
     print(result.is_success())
@@ -87,7 +86,9 @@ def convex_sampling_hjb_lower_bound(poly_deg, params_dict):
     print("# of quadratic constraints: ", len(
         prog.rotated_lorentz_cone_constraints()))
 
-    plot_value_function(J_star, params_dict, poly_func, poly_deg, file_name="convex_sampling_hjb_lower_bound_mesh{}".format(n_mesh))
+    dJdz = J_star.ToExpression().Jacobian(z)
+    u_star = - .5 * params_dict["Rinv"].dot(f2.T).dot(dJdz.T)
+    plot_value_function_sos(J_star, u_star, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg, file_name="convex_sampling_hjb_lower_bound")
 
     return J_star
 
@@ -327,12 +328,8 @@ def plot_value_function(coeff, params_dict, poly_func, deg, file_name="pendulum_
     plt.savefig("figures/pendulum/{}_policy_{}.png".format(file_name, deg))
 
 if __name__ == '__main__':
-    poly_deg = 8
+    poly_deg = 4
     print("Deg: ", poly_deg)
     params_dict = pendulum_setup()
     J = convex_sampling_hjb_lower_bound(poly_deg, params_dict)
-
-    np.save("pendulum_swingup/data/hjb/J_convex_{}".format(poly_deg), J)
-    # J = np.load("pendulum_swingup/data/hjb/J_convex_{}.npy".format(poly_deg))
-    # verify_sos(J, params_dict, poly_deg)
     

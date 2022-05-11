@@ -1,6 +1,7 @@
 import numpy as np
 from pydrake.examples.pendulum import (PendulumParams)
-from pydrake.all import (MathematicalProgram, Solve, SolverOptions, CommonSolverOption, Polynomial)
+from pydrake.all import (MathematicalProgram, Solve, SolverOptions, CommonSolverOption, Polynomial, Variables)
+from utils import *
 
 from matplotlib import cm
 import matplotlib.pyplot as plt
@@ -55,48 +56,7 @@ def pendulum_setup():
     return params_dict
 
 
-def monomial(x, n):
-    return x**n
-
-
-def calc_basis(z, coeff_shape, poly_func):
-    Z = np.zeros(coeff_shape)
-    it = np.nditer(Z, flags=['multi_index'])
-    for x in it:
-        idx = it.multi_index
-        b = 1
-        for dim in range(len(idx)):
-            b *= poly_func(z[dim], idx[dim])
-        Z[idx] = b
-    return Z.flatten()
-
-
-def calc_dJdz(coeff, poly_func, nz):
-    prog = MathematicalProgram()
-    z = prog.NewIndeterminates(nz, 'z')
-    J = calc_value_function(z, coeff, poly_func)
-    dJdz_expr = J.Jacobian(z)
-    return dJdz_expr, z
-
-
-def calc_value_function(x, J, poly_func):
-    assert len(x) == len(J.shape)
-    it = np.nditer(J, flags=['multi_index', 'refs_ok'])
-    p = 0
-    for k in it:
-        b = np.copy(k)
-        for dim, idx in enumerate(it.multi_index):
-            b = b*poly_func(x[dim], idx)
-        p += b
-    return p
-
-
-def calc_u_opt(dJdz, f2):
-    u_star = - .5 * params_dict["Rinv"].dot(f2.T).dot(dJdz.T)
-    return u_star
-
-
-def fitted_value_iteration(poly_deg, params_dict, dt, gamma=1):
+def fitted_value_iteration_discrete_time(poly_deg, params_dict, dt, gamma=1):
     nz = params_dict["nz"]
     coeff_shape = np.ones(nz, dtype=int) * (poly_deg + 1)
     old_coeff = np.zeros(coeff_shape)
@@ -119,7 +79,7 @@ def fitted_value_iteration(poly_deg, params_dict, dt, gamma=1):
         # dJdz, z = calc_dJdz(J_coeff, poly_func, nz)
 
         J = calc_value_function(z, J_coeff, poly_func)
-        u_opt = calc_u_opt(dJdz, f2)
+        u_opt = calc_u_opt(dJdz, f2, params_dict["Rinv"])
         z_next = f(z, u_opt) * dt + z
         J_target = l(z, u_opt) * dt + gamma * calc_value_function(z_next,
                                                                   J_coeff, poly_func) 
@@ -152,7 +112,149 @@ def fitted_value_iteration(poly_deg, params_dict, dt, gamma=1):
             
     return coeff
 
-def plot_value_function(coeff, params_dict, poly_func, deg, dt):
+
+def fitted_value_iteration_continuous_time(poly_deg, params_dict, dt, eps=1e-3):
+    nz = params_dict["nz"]
+    coeff_shape = np.ones(nz, dtype=int) * (poly_deg + 1)
+    old_coeff = np.random.random(coeff_shape)
+    f = params_dict["f"]
+    l = params_dict["l"]
+    f2 = params_dict["f2"]
+    z_max = np.array([1, 1, 2*np.pi])
+    z_min = -z_max
+    poly_func = lambda x, n: monomial(x, n)
+
+    for iter in range(100):
+        print("Iter: ", iter)
+        # dJdz, z = calc_dJdz(old_coeff, poly_func, nz)
+        prog = MathematicalProgram()
+        J_coeff_var = prog.NewContinuousVariables(np.product(coeff_shape),
+                                                        "J")
+        J_coeff = np.array(J_coeff_var).reshape(coeff_shape)
+
+        dJdz, z = calc_dJdz(J_coeff, poly_func, nz)
+
+        u_opt = calc_u_opt(dJdz, f2, params_dict["Rinv"])
+        diff_int = Polynomial((l(z, u_opt) + dJdz.dot(f(z,u_opt)))**2)
+        for i in range(nz):
+            diff_int = diff_int.Integrate(z[i], z_min[i], z_max[i])
+        prog.AddCost(diff_int.ToExpression())
+
+        # J(z0) = 0
+        J0 = calc_value_function(params_dict["z0"], J_coeff, poly_func)
+        prog.AddLinearConstraint(J0 == 0)  
+        lam = prog.NewFreePolynomial(Variables(z), 2).ToExpression()
+        S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
+        options = SolverOptions()
+        options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+        prog.SetSolverOptions(options)
+        result = Solve(prog)
+
+        coeff = result.GetSolution(J_coeff_var).reshape(coeff_shape)
+        print("Diff: ", np.linalg.norm(coeff-old_coeff))
+
+        if np.allclose(coeff, old_coeff):
+            plot_value_function(coeff, params_dict, poly_func, poly_deg, dt)
+            return coeff
+
+        if result.is_success():
+            old_coeff = coeff
+        else:
+            print("Optimizer fails")
+            
+    return coeff
+
+
+def fitted_value_iteration_continuous_time_sos(poly_deg, params_dict):
+    nz = params_dict["nz"]
+    f = params_dict["f"]
+    l = params_dict["l"]
+    f2 = params_dict["f2"]
+    z_max = np.array([1, 1, 2*np.pi])
+    z_min = -z_max
+
+    for iter in range(100):
+        print("Iter: ", iter)
+        prog = MathematicalProgram()
+        z = prog.NewIndeterminates(nz, 'z')
+        J = prog.NewFreePolynomial(Variables(z), poly_deg)
+        J_expr = J.ToExpression()
+        if iter == 0:
+            old_J = Polynomial(np.ones(nz).dot(z))
+        dJdz = old_J.ToExpression().Jacobian(z)
+
+        u_opt = calc_u_opt(dJdz, f2, params_dict["Rinv"])
+        diff_int = Polynomial((l(z, u_opt) + dJdz.dot(f(z,u_opt)))**2)
+        for i in range(nz):
+            diff_int = diff_int.Integrate(z[i], z_min[i], z_max[i])
+        prog.AddCost(diff_int.ToExpression())
+
+        # J(z0) = 0
+        J0 = J_expr.EvaluatePartial(dict(zip(z, params_dict["z0"])))
+        prog.AddLinearConstraint(J0 == 0)  
+        lam = prog.NewFreePolynomial(Variables(z), 2).ToExpression()
+        S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
+        # Enforce that value function is PD
+        prog.AddSosConstraint(J_expr + S_procedure)
+
+        result = Solve(prog)
+        assert result.is_success()
+
+        J_star = result.GetSolution(J)
+
+        if J_star.CoefficientsAlmostEqual(old_J, 1e-5):
+            break
+        else:
+            diff = Polynomial(J_star.ToExpression(), z)-Polynomial(old_J.ToExpression(), z)
+            coeff_diff = []
+            for monomial,coeff in diff.monomial_to_coefficient_map().items():
+                coeff_diff.append(coeff)
+                # print(f'monomial: {monomial}, coef: {coeff}')
+            # print("coefficient difference: ", coeff_diff)
+
+        old_J = J_star
+
+    dJdz = J_star.ToExpression().Jacobian(z)
+    u_star = calc_u_opt(dJdz, f2, params_dict['Rinv'])
+    return J_star, u_star, z
+
+def plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, poly_deg, file_name=""):
+    X1, X2 = np.meshgrid(np.linspace(x_min[0], x_max[0], 51),
+                    np.linspace(x_min[1], x_max[1], 51))
+    X = np.vstack((X1.flatten(), X2.flatten()))
+    Z = x2z(X)
+    J = np.zeros(Z.shape[1])
+    U = np.zeros(Z.shape[1])
+    for i in range(Z.shape[1]):
+        J[i] = J_star.Evaluate({z[0]: Z[0, i], z[1]: Z[1, i], z[2]: Z[2, i]})
+        U[i] = u_star[0].Evaluate({z[0]: Z[0, i], z[1]: Z[1, i], z[2]: Z[2, i]})
+
+    fig = plt.figure(figsize=(9, 4))
+    ax = fig.subplots()
+    ax.set_xlabel("q")
+    ax.set_ylabel("qdot")
+    ax.set_title("Cost-to-Go")
+    im = ax.imshow(J.reshape(X1.shape),
+            cmap=cm.jet, aspect='auto',
+            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+    ax.invert_yaxis()
+    fig.colorbar(im)
+    plt.savefig("figures/pendulum/{}_{}.png".format(file_name, poly_deg))
+
+    fig = plt.figure(figsize=(9, 4))
+    ax = fig.subplots()
+    ax.set_xlabel("q")
+    ax.set_ylabel("qdot")
+    ax.set_title("Policy")
+    im = ax.imshow(U.reshape(X1.shape),
+            cmap=cm.jet, aspect='auto',
+            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+    ax.invert_yaxis()
+    fig.colorbar(im)
+    plt.savefig("figures/pendulum/{}_policy_{}.png".format(file_name, poly_deg))
+
+
+def plot_value_function(coeff, params_dict, poly_func, deg, ):
     x2z = params_dict["x2z"]
     x_min = params_dict["x_min"]
     x_max = params_dict["x_max"]
@@ -165,7 +267,7 @@ def plot_value_function(coeff, params_dict, poly_func, deg, dt):
     U = np.zeros(Z.shape[1])
     dJdz, z = calc_dJdz(coeff, poly_func, params_dict["nz"])
     J0 = calc_value_function(params_dict["z0"], coeff, poly_func)
-    u_opt_expr = calc_u_opt(dJdz, params_dict["f2"]) 
+    u_opt_expr = calc_u_opt(dJdz, params_dict["f2"], params_dict["Rinv"]) 
     for i in range(Z.shape[1]):
         J[i] = calc_value_function(Z[:,i], coeff, poly_func)
         U[i] = u_opt_expr[0].Evaluate(dict(zip(z, Z[:, i])))
@@ -182,7 +284,7 @@ def plot_value_function(coeff, params_dict, poly_func, deg, dt):
             extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("figures/fvi/integration/fvi_pendulum_swingup_{}_{}.png".format(deg, dt))
+    plt.savefig("figures/fvi/pendulum/fvi_pendulum_swingup_{}.png".format(deg))
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -194,13 +296,13 @@ def plot_value_function(coeff, params_dict, poly_func, deg, dt):
             extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("figures/fvi/integration/fvi_pendulum_swingup_policy_{}_{}.png".format(deg, dt))
+    plt.savefig("figures/fvi/pendulum/fvi_pendulum_swingup_policy_{}.png".format(deg))
 
 
 if __name__ == '__main__':
-    poly_deg = 2
-    dt = 0.1
+    poly_deg = 6
     params_dict = pendulum_setup()
-    J = fitted_value_iteration(poly_deg, params_dict, dt)
+    J, u, z = fitted_value_iteration_continuous_time_sos(poly_deg, params_dict)
+    plot_value_function_sos(J, u, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], poly_deg, directory="integration")
 
-    np.save("pendulum_swingup/data/integration/J_{}_{}.npy".format(poly_deg, dt), J)
+    # np.save("pendulum_swingup/data/integration/J_{}_{}.npy".format(poly_deg, dt), J)
