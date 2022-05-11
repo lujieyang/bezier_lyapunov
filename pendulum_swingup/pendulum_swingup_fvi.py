@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 
 
-def convex_sampling_hjb_lower_bound(deg, params_dict):
+def convex_sampling_hjb_lower_bound(deg, params_dict, objective=""):
+    print("Objective: ", objective)
     # Sample for nonnegativity constraint of HJB RHS
     nz = params_dict["nz"]
     coeff_shape = np.ones(nz, dtype=int) * (deg + 1)
@@ -60,10 +61,23 @@ def convex_sampling_hjb_lower_bound(deg, params_dict):
     end_time = time.time()
     print("Time for adding constraints: ", end_time-start_time)
 
-    # obj = J
-    # for i in range(nz):
-    #     obj = obj.Integrate(z[i], z_min[i], z_max[i])
-    # prog.AddCost(-obj.ToExpression())
+    if objective=="integrate_all":
+        obj = J
+        for i in range(nz):
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        prog.AddCost(-obj.ToExpression())
+    elif objective=="integrate_ring":
+        obj = J.Integrate(z[-1], z_min[-1], z_max[-1])
+        c_r = 1
+        cost = 0
+        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+            s_deg = monomial.degree(z[0]) 
+            c_deg = monomial.degree(z[1])
+            monomial_int = quad(lambda x: np.sin(x)**s_deg * np.cos(x)**c_deg, 0, 2*np.pi)[0]
+            if np.abs(monomial_int) <=1e-5:
+                monomial_int = 0
+            cost += monomial_int * coeff
+        prog.AddLinearCost(-c_r * cost)
 
     # J(z0) = 0
     J0 = J_expr.EvaluatePartial(dict(zip(z, params_dict["z0"])))
@@ -88,9 +102,10 @@ def convex_sampling_hjb_lower_bound(deg, params_dict):
 
     dJdz = J_star.ToExpression().Jacobian(z)
     u_star = - .5 * params_dict["Rinv"].dot(f2.T).dot(dJdz.T)
-    plot_value_function_sos(J_star, u_star, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg, file_name="convex_sampling_hjb_lower_bound")
+    plot_value_function_sos(J_star, u_star, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg,
+    file_name="convex_sampling_hjb_lower_bound_{}".format(objective))
 
-    return J_star
+    return J_star, u_star, z
 
 def verify_sos(J_coeff, params_dict, poly_deg):
     nz = params_dict["nz"]
@@ -328,8 +343,8 @@ def plot_value_function(coeff, params_dict, poly_func, deg, file_name="pendulum_
     plt.savefig("figures/pendulum/{}_policy_{}.png".format(file_name, deg))
 
 if __name__ == '__main__':
-    poly_deg = 4
+    poly_deg = 8
     print("Deg: ", poly_deg)
     params_dict = pendulum_setup()
-    J = convex_sampling_hjb_lower_bound(poly_deg, params_dict)
+    convex_sampling_hjb_lower_bound(poly_deg, params_dict, objective="")
     
