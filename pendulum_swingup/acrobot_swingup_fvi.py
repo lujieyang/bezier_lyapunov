@@ -198,12 +198,22 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
 
     dJdz = J_star.ToExpression().Jacobian(z)
     if visualize:
-        plot_value_function_sos(J_star, 0, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg,
+        plot_value_function_sos(J_star, z, params_dict, deg,
         file_name="convex_sampling_hjb_lower_bound_{}_mesh_{}".format(objective, n_mesh))
 
     return J_star, z
 
-def plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, poly_deg, file_name=""):
+def plot_value_function_sos(J_star, z, params_dict, poly_deg, file_name=""):
+    nz = params_dict["nz"]
+    x_min = params_dict["x_min"]
+    x_max = params_dict["x_max"]
+    Minv = params_dict["Minv"]
+    T = params_dict["T"]
+    f2 = params_dict["f2"]
+    x2z = params_dict["x2z"]
+
+    dJdz = J_star.ToExpression().Jacobian(z)
+
     X1, X2 = np.meshgrid(np.linspace(x_min[0], x_max[0], 51),
                     np.linspace(x_min[1], x_max[1], 51))
     X = np.vstack((X1.flatten(), X2.flatten(), np.zeros(51*51), np.zeros(51*51)))
@@ -211,8 +221,16 @@ def plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, poly_deg, file
     J = np.zeros(Z.shape[1])
     U = np.zeros(Z.shape[1])
     for i in range(Z.shape[1]):
-        J[i] = J_star.Evaluate({z[0]: Z[0, i], z[1]: Z[1, i], z[2]: Z[2, i], z[3]: Z[3, i], z[4]: Z[4, i], z[5]: Z[5, i]})
-        # U[i] = u_star[0].Evaluate({z[0]: Z[0, i], z[1]: Z[1, i], z[2]: Z[2, i], z[3]: Z[3, i], z[4]: Z[4, i], z[5]: Z[5, i]})
+        z_val = Z[:, i]
+        x = X[:, i]
+        J[i] = J_star.Evaluate(dict(zip(z, z_val)))
+        Minv_val = Minv(x)
+        T_val = T(z_val)
+        f2_val = f2(Minv_val, T_val)
+        dJdz_val = np.zeros(nz, dtype=Expression)
+        for n in range(nz): 
+            dJdz_val[n] = dJdz[n].Evaluate(dict(zip(z, z_val)))
+        U[i] = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -226,17 +244,17 @@ def plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, poly_deg, file
     fig.colorbar(im)
     plt.savefig("figures/acrobot/{}_{}.png".format(file_name, poly_deg))
 
-    # fig = plt.figure(figsize=(9, 4))
-    # ax = fig.subplots()
-    # ax.set_xlabel("q")
-    # ax.set_ylabel("qdot")
-    # ax.set_title("Policy")
-    # im = ax.imshow(U.reshape(X1.shape),
-    #         cmap=cm.jet, aspect='auto',
-    #         extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
-    # ax.invert_yaxis()
-    # fig.colorbar(im)
-    # plt.savefig("figures/acrobot/{}_policy_{}.png".format(file_name, poly_deg))
+    fig = plt.figure(figsize=(9, 4))
+    ax = fig.subplots()
+    ax.set_xlabel("q1")
+    ax.set_ylabel("q2")
+    ax.set_title("Policy")
+    im = ax.imshow(U.reshape(X1.shape),
+            cmap=cm.jet, aspect='auto',
+            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+    ax.invert_yaxis()
+    fig.colorbar(im)
+    plt.savefig("figures/acrobot/{}_policy_{}.png".format(file_name, poly_deg))
 
 if __name__ == '__main__':
     poly_deg = 4
