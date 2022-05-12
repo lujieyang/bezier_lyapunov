@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 
 
-def convex_sampling_hjb_lower_bound(deg, params_dict, objective=""):
+def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective=""):
     print("Objective: ", objective)
     # Sample for nonnegativity constraint of HJB RHS
     nz = params_dict["nz"]
@@ -33,7 +33,6 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, objective=""):
     u_opt = calc_u_opt(dJdz, f2, params_dict["Rinv"])
 
     RHS = -(l(z, u_opt) + dJdz.dot(f(z, u_opt)))
-    n_mesh = 51
     mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
     mesh_pts[int(np.floor(n_mesh/2))] = 0
 
@@ -103,7 +102,7 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, objective=""):
     dJdz = J_star.ToExpression().Jacobian(z)
     u_star = - .5 * params_dict["Rinv"].dot(f2.T).dot(dJdz.T)
     plot_value_function_sos(J_star, u_star, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg,
-    file_name="convex_sampling_hjb_lower_bound_{}".format(objective))
+    file_name="convex_sampling_hjb_lower_bound_{}_mesh_{}".format(objective, n_mesh))
 
     return J_star, u_star, z
 
@@ -343,8 +342,8 @@ def plot_value_function(coeff, params_dict, poly_func, deg, file_name="pendulum_
     plt.savefig("figures/pendulum/{}_policy_{}.png".format(file_name, deg))
 
 if __name__ == '__main__':
-    poly_deg = 8
+    poly_deg = 2
     print("Deg: ", poly_deg)
     params_dict = pendulum_setup()
-    convex_sampling_hjb_lower_bound(poly_deg, params_dict, objective="")
+    convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=6, objective="integrate_ring")
     
