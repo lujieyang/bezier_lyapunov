@@ -61,7 +61,6 @@ def acrobot_setup():
         tau_q = np.array([-m1*g*lc1*s1 - m2*g*(l1*s1+lc2*s12),-m2*g*lc2*s12])
         f_val[nq:] = Minv@(tau_q + B@u - C@qdot)
         return T @ f_val
-        # return f_val
     
     def f2(Minv, T):
         f2_val = np.zeros([nx, nu])
@@ -91,7 +90,7 @@ def acrobot_setup():
                    "T":T, "nq": nq}
     return params_dict
 
-def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective=""):
+def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", visualize=True):
     print("Objective: ", objective)
     # Sample for nonnegativity constraint of HJB RHS
     nz = params_dict["nz"]
@@ -198,8 +197,9 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective=""):
         prog.rotated_lorentz_cone_constraints()))
 
     dJdz = J_star.ToExpression().Jacobian(z)
-    plot_value_function_sos(J_star, 0, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg,
-    file_name="convex_sampling_hjb_lower_bound_{}_mesh_{}".format(objective, n_mesh))
+    if visualize:
+        plot_value_function_sos(J_star, 0, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg,
+        file_name="convex_sampling_hjb_lower_bound_{}_mesh_{}".format(objective, n_mesh))
 
     return J_star, z
 
@@ -242,4 +242,4 @@ if __name__ == '__main__':
     poly_deg = 4
     print("Deg: ", poly_deg)
     params_dict = acrobot_setup()
-    convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=6, objective="integrate_ring")
+    convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=11, objective="integrate_ring")
