@@ -67,9 +67,8 @@ def acrobot_setup():
         return T@f2_val
 
     # State limits (region of state space where we approximate the value function).
-    x_max = np.ones(nx)*2*np.pi
-    x_max[1] = np.pi
-    x_min = np.array([0, -np.pi, -2*np.pi, -2*np.pi])
+    x_max = np.array([2*np.pi, np.pi/2, 3, 3])
+    x_min = np.array([0, -np.pi/2, -3, -3])
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([np.pi, 0, 0, 0])
@@ -100,8 +99,9 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
     l = params_dict["l"]
     f2 = params_dict["f2"]
     x2z = params_dict["x2z"]
-    z_max = np.array([1, 1, 1, 1, 2*np.pi, 2*np.pi])
+    z_max = np.array([1, 1, 1, 1, 3, 3])
     z_min = -z_max
+    z_min[3] = 0
 
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz, "z")
@@ -241,7 +241,7 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
             extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("figures/acrobot/{}_{}.png".format(file_name, poly_deg))
+    plt.savefig("acrobot/figures/{}_{}.png".format(file_name, poly_deg))
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -253,10 +253,10 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
             extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("figures/acrobot/{}_policy_{}.png".format(file_name, poly_deg))
+    plt.savefig("acrobot/figures/{}_policy_{}.png".format(file_name, poly_deg))
 
 if __name__ == '__main__':
-    poly_deg = 3
+    poly_deg = 2
     print("Deg: ", poly_deg)
     params_dict = acrobot_setup()
     convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=11, objective="integrate_ring")
