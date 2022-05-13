@@ -13,6 +13,7 @@ MONOMIAL = "monomial"
 HERMITE = "hermite"
 DRAKE = "drake"
 LSTSQ = "lstsq"
+BARYCENTRIC = "barycentric"
 
 def pendulum_setup(poly_type=CHEBYSHEV):
     nz = 3
@@ -248,7 +249,17 @@ def fit_barycentric_fvi(poly_deg, params_dict):
     mesh_pts[int(np.floor(n_mesh/2))] = 0
     coeff_shape = np.ones(params_dict["nz"], dtype=int) * (poly_deg + 1)
     x2z = params_dict["x2z"]
-    poly_func = lambda t, i, n: monomial(t, i, n)
+
+    if poly_type == CHEBYSHEV:
+        poly_func = lambda t, i, n: chebyshev_polynomial(t, i, n)
+    elif poly_type == LEGENDRE:
+        poly_func = lambda t, i, n: legendre_polynomial(t, i, n)
+    elif poly_type == BERNSTEIN:
+        poly_func = lambda t, i, n: bernstein_polynomial(t, i, n)
+    elif poly_type == HERMITE:
+        poly_func = lambda t, i, n: hermite_polynomial(t, i, n)
+    elif poly_type == MONOMIAL:
+        poly_func = lambda t, i, n: monomial(t, i, n)
     Z = []
     Jd = np.load("pendulum_swingup/data/J.npy")
 
@@ -260,8 +271,9 @@ def fit_barycentric_fvi(poly_deg, params_dict):
             z = x2z(x)
             basis = calc_basis(z, coeff_shape, poly_func)
             Z.append(basis)
+    Z = np.array(Z)
     J = np.linalg.lstsq(Z, Jd.flatten())[0].reshape(coeff_shape)
-    plot_value_function(J, params_dict, poly_func, deg, dt, poly_type)
+    plot_value_function(J, params_dict, poly_func, deg, dt, poly_type, method=method)
     np.save("pendulum_swingup/data/{}/{}/J_{}_{}.npy".format(method, poly_type, deg, dt), J)
 
 
@@ -351,11 +363,12 @@ def calc_value_function(x, K, poly_func):
 
 
 if __name__ == '__main__':
-    method = DRAKE
-    poly_type = MONOMIAL
+    method = BARYCENTRIC
+    poly_type = CHEBYSHEV
     params_dict = pendulum_setup(poly_type)
-    deg = 3
+    deg = 6
     dt = 0.01
+    fit_barycentric_fvi(deg, params_dict)
     if method == LSTSQ:
         J = fitted_value_iteration_lstsq(deg, params_dict, poly_type, dt=dt, gamma=.9, old_target=False)
     elif method == DRAKE:

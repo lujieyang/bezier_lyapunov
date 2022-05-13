@@ -1,7 +1,7 @@
 import numpy as np
 import unittest
 from pydrake.all import (Variable)
-from polynomial_fvi import *
+from polynomial_sampling_fvi import *
 
 
 class TestPolynomial(unittest.TestCase):
