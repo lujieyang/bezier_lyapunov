@@ -113,13 +113,14 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
     mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
 
     start_time = time.time()
+    # The order of theta1/2/dot is important!
     for i in range(n_mesh):
         print("Mesh x0 No.", i)
         theta1 = mesh_pts[i, 0]
         for j in range(n_mesh):
-            thetadot1 = mesh_pts[j, 1]
+            theta2 = mesh_pts[j, 1]
             for k in range(n_mesh):
-                theta2 = mesh_pts[k, 2]
+                thetadot1 = mesh_pts[k, 2]
                 for h in range(n_mesh):
                     thetadot2 = mesh_pts[h, 3]
                     x = np.array([theta1, theta2, thetadot1, thetadot2])
@@ -256,7 +257,7 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
     plt.savefig("acrobot/figures/{}_policy_{}.png".format(file_name, poly_deg))
 
 if __name__ == '__main__':
-    poly_deg = 2
+    poly_deg = 4
     print("Deg: ", poly_deg)
     params_dict = acrobot_setup()
-    convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=11, objective="integrate_ring")
+    convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=15, objective="integrate_ring")
