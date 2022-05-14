@@ -26,6 +26,7 @@ def acrobot_swingup_example():
     state_grid = [set(q1bins), set(q2bins), set(qdotbins), set(qdotbins)]
     options.periodic_boundary_conditions = [
         PeriodicBoundaryCondition(0, 0., 2. * np.pi),
+        PeriodicBoundaryCondition(1, 0., 2. * np.pi),
     ]
     options.discount_factor = .999
     input_limit = 3.
@@ -82,6 +83,7 @@ def simulate(policy):
     acrobot = builder.AddSystem(plant)
     wrap = builder.AddSystem(WrapToSystem(4))
     wrap.set_interval(0, 0, 2*np.pi)
+    wrap.set_interval(1, 0, 2*np.pi)
     builder.Connect(acrobot.get_output_port(0), wrap.get_input_port(0))
     vi_policy = builder.AddSystem(policy)
     builder.Connect(wrap.get_output_port(0), vi_policy.get_input_port(0))

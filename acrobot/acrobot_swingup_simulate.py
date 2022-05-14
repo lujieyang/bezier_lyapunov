@@ -15,7 +15,7 @@ import meshcat
 
 # %%
 class Controller(LeafSystem):
-    def __init__(self, u_star, z, plant, params_dict, J_star):
+    def __init__(self, J_star, z, plant, params_dict):
         LeafSystem.__init__(self)
         self.plant = plant
         self.context = plant.CreateDefaultContext()
@@ -36,6 +36,7 @@ class Controller(LeafSystem):
             "state", BasicVector(self.x_dim))
         self.policy_output_port = self.DeclareVectorOutputPort(
             "policy", BasicVector(self.u_dim), self.CalculateController)
+        
     def CalculateController(self, context, output):
         x = self.state_input_port.Eval(context)
         z_val = self.x2z(x)
@@ -43,7 +44,7 @@ class Controller(LeafSystem):
         Minv_val = self.Minv(x)
         T_val = self.T(z_val)
         f2_val = self.f2(Minv_val, T_val)
-        dJdz_val = np.zeros(self.nz, dtype=Expression)
+        dJdz_val = np.zeros(self.nz)
         for n in range(self.nz): 
             dJdz_val[n] = self.dJdz[n].Evaluate(dict(zip(z, z_val)))
         u_opt = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
@@ -62,8 +63,9 @@ def simulate(J_star, z, params_dict):
     acrobot = builder.AddSystem(plant)
     wrap = builder.AddSystem(WrapToSystem(4))
     wrap.set_interval(0, 0, 2*np.pi)
+    wrap.set_interval(1, 0, 2*np.pi)
     builder.Connect(acrobot.get_output_port(0), wrap.get_input_port(0))
-    vi_policy = Controller(J_star, z, acrobot, params_dict,J_star)
+    vi_policy = Controller(J_star, z, acrobot, params_dict)
     builder.AddSystem(vi_policy)
     builder.Connect(wrap.get_output_port(0), vi_policy.get_input_port(0))
     builder.Connect(vi_policy.get_output_port(0),
