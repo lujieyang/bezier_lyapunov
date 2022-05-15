@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 
 
-def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective=""):
+def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", visualize=True):
     print("Objective: ", objective)
     # Sample for nonnegativity constraint of HJB RHS
     nz = params_dict["nz"]
@@ -101,8 +101,9 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective=""):
 
     dJdz = J_star.ToExpression().Jacobian(z)
     u_star = - .5 * params_dict["Rinv"].dot(f2.T).dot(dJdz.T)
-    plot_value_function_sos(J_star, u_star, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg,
-    file_name="convex_sampling_hjb_lower_bound_{}_mesh_{}".format(objective, n_mesh))
+    if visualize:
+        plot_value_function_sos(J_star, u_star, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg,
+        file_name="convex_sampling_hjb_lower_bound_{}_mesh_{}".format(objective, n_mesh))
 
     return J_star, u_star, z
 

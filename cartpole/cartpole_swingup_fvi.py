@@ -19,7 +19,7 @@ def cartpole_setup():
     mp = 1
     l = .5
     g = 9.81
-    B = np.array([[0], [1]])
+    
     # Map from original state to augmented state.
     # Uses sympy to be able to do symbolic integration later on.
     # x = (x, theta, xdot, thetadot)
@@ -41,9 +41,9 @@ def cartpole_setup():
         qdot = x[nq:]
         f_val = np.zeros(nx, dtype=Expression)
         f_val[:nq] = qdot
-        f_val[2] = (u + mp*s*(l*qdot[1]**2+g*c))/(mc+mp*s**2)
-        f_val[3] = (-u*c - mp*l*qdot[1]**2*c*s - (mc+mp)*g*s)/(mc+mp*s**2)/l
-        return T @ f_val
+        f_val[2] = ((u + mp*s*(l*qdot[1]**2+g*c))/(mc+mp*s**2))[0]
+        f_val[3] = ((-u*c - mp*l*qdot[1]**2*c*s - (mc+mp)*g*s)/(mc+mp*s**2)/l)[0]
+        return T @ f_val 
     
     def f2(x, T):
         s = np.sin(x[1])
@@ -118,7 +118,7 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
                     u_opt = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
                     f_val = f(x, u_opt, T_val)
                     constr = -(l_cost(z_val, u_opt) + dJdz_val.dot(f_val))
-                    poly = Polynomial(constr[0])
+                    poly = Polynomial(constr)
                     poly = poly.RemoveTermsWithSmallCoefficients(1e-6)
                     variables, map_var_to_index = sym.ExtractVariablesFromExpression(
                         constr)
@@ -231,7 +231,7 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
     plt.savefig("cartpole/figures/{}_policy_{}.png".format(file_name, poly_deg))
 
 if __name__ == '__main__':
-    poly_deg = 2
+    poly_deg = 4
     print("Deg: ", poly_deg)
     params_dict = cartpole_setup()
-    convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=11, objective="integrate_ring")
+    convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=15, objective="integrate_ring")
