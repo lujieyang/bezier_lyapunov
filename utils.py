@@ -38,3 +38,26 @@ def calc_value_function(x, J, poly_func):
 def calc_u_opt(dJdz, f2, Rinv):
     u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
     return u_star
+
+
+def extract_polynomial_coeff_dict(poly, z):
+    # return a dictionary of monomials and their coefficients
+    nz = len(z)
+    C = {}
+    for monomial,coeff in poly.monomial_to_coefficient_map().items(): 
+        m = []
+        for i in range(nz):
+            m.append(monomial.degree(z[i]))
+        C[tuple(m)] = coeff.Evaluate({z[0]:0})
+    return C
+
+
+def reconstruct_polynomial_from_dict(C, z):
+    poly = 0
+    nz = len(z)
+    for monomial in C.keys():
+        m = 1
+        for i in range(nz):
+            m *= z[i]**monomial[i]
+        poly += m * C[monomial]
+    return poly

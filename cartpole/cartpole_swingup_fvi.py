@@ -1,5 +1,6 @@
 import time
-from pendulum_swingup.utils import *
+from utils import *
+import pickle
 from pydrake.all import (Solve, SolverOptions, CommonSolverOption, Polynomial, Variables)
 from scipy.integrate import quad
 from pydrake.solvers import mathematicalprogram as mp
@@ -54,8 +55,8 @@ def cartpole_setup():
         return T@f2_val
 
     # State limits (region of state space where we approximate the value function).
-    x_max = np.array([2, 2*np.pi, 3, 3])
-    x_min = np.array([-2, 0, -3, -3])
+    x_max = np.array([1, 1.5*np.pi, 2, 2])
+    x_min = np.array([-1, 0.5*np.pi, -2, -2])
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([0, np.pi, 0, 0])
@@ -231,7 +232,13 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
     plt.savefig("cartpole/figures/{}_policy_{}.png".format(file_name, poly_deg))
 
 if __name__ == '__main__':
-    poly_deg = 4
+    poly_deg = 6
+    n_mesh = 11
     print("Deg: ", poly_deg)
     params_dict = cartpole_setup()
-    convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=15, objective="integrate_ring")
+    J_star, z = convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=True)
+
+    C = extract_polynomial_coeff_dict(J_star, z)
+    f = open("cartpole/data/J_{}_{}".format(poly_deg, n_mesh),"wb")
+    pickle.dump(C, f)
+    f.close()
