@@ -1,6 +1,6 @@
 import time
-from pendulum_swingup.utils import *
-from pydrake.all import (MakeVectorVariable, Solve, SolverOptions, CommonSolverOption, Polynomial, Variables)
+from utils import *
+from pydrake.all import (ge, Solve, SolverOptions, CommonSolverOption, Polynomial, Variables)
 from scipy.integrate import quad
 from pydrake.solvers import mathematicalprogram as mp
 import pydrake.symbolic as sym
@@ -113,6 +113,7 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
     mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
 
     start_time = time.time()
+    J_val = []
     # The order of theta1/2/dot is important!
     for i in range(n_mesh):
         print("Mesh x0 No.", i)
@@ -126,7 +127,7 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
                     x = np.array([theta1, theta2, thetadot1, thetadot2])
                     z_val = x2z(x)
                     z_val[np.abs(z_val)<=1e-6] = 0
-                    prog.AddLinearConstraint(J_expr.EvaluatePartial(dict(zip(z, z_val))) >= 0)
+                    J_val.append(J_expr.EvaluatePartial(dict(zip(z, z_val))))
                     # RHS of HJB
                     Minv_val = Minv(x)
                     T_val = T(z_val)
@@ -147,6 +148,7 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
                             Q, b, c, variables, psd_tol=1e-5)
                     except:
                         pass
+    prog.AddLinearConstraint(ge(np.array(J_val), 0))
     end_time = time.time()
     print("Time for adding constraints: ", end_time-start_time)
 
