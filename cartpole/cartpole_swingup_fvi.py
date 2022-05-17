@@ -55,8 +55,8 @@ def cartpole_setup():
         return T@f2_val
 
     # State limits (region of state space where we approximate the value function).
-    x_max = np.array([1, 1.5*np.pi, 2, 2])
-    x_min = np.array([-1, 0.5*np.pi, -2, -2])
+    x_max = np.array([2, 2*np.pi, 3, 3])
+    x_min = np.array([-2, 0, -3, -3])
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([0, np.pi, 0, 0])
@@ -180,13 +180,15 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
 
     return J_star, z
 
-def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
+def plot_value_function(J_star, z, params_dict, poly_deg, file_name="", check_inequality_gap=True):
     nz = params_dict["nz"]
     x_min = params_dict["x_min"]
     x_max = params_dict["x_max"]
     T = params_dict["T"]
     f2 = params_dict["f2"]
     x2z = params_dict["x2z"]
+    l_cost = params_dict["l_cost"]
+    f = params_dict["f"]
 
     dJdz = J_star.ToExpression().Jacobian(z)
 
@@ -196,6 +198,7 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
     Z = x2z(X)
     J = np.zeros(Z.shape[1])
     U = np.zeros(Z.shape[1])
+    RHS = np.zeros(Z.shape[1])
     for i in range(Z.shape[1]):
         z_val = Z[:, i]
         x = X[:, i]
@@ -205,7 +208,11 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
         dJdz_val = np.zeros(nz, dtype=Expression)
         for n in range(nz): 
             dJdz_val[n] = dJdz[n].Evaluate(dict(zip(z, z_val)))
-        U[i] = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
+        u_opt = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
+        U[i] = u_opt
+        if check_inequality_gap:
+            f_val = f(x, u_opt, T_val)
+            RHS[i] = l_cost(z_val, u_opt) + dJdz_val.dot(f_val)
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -231,9 +238,23 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
     fig.colorbar(im)
     plt.savefig("cartpole/figures/{}_policy_{}.png".format(file_name, poly_deg))
 
+    if check_inequality_gap:
+        fig = plt.figure(figsize=(9, 4))
+        ax = fig.subplots()
+        ax.set_xlabel("x")
+        ax.set_ylabel("theta")
+        ax.set_title("Bellman Inequality")
+        im = ax.imshow(RHS.reshape(X1.shape),
+                cmap=cm.jet, aspect='auto',
+                extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+        ax.invert_yaxis()
+        fig.colorbar(im)
+        plt.savefig("cartpole/figures/{}_inequality_{}.png".format(file_name, poly_deg))
+
+
 if __name__ == '__main__':
-    poly_deg = 6
-    n_mesh = 11
+    poly_deg = 2
+    n_mesh = 6
     print("Deg: ", poly_deg)
     params_dict = cartpole_setup()
     J_star, z = convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=True)

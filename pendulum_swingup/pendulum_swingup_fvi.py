@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 
 
-def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", visualize=True):
+def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", visualize=True, check_inequality_gap=True):
     print("Objective: ", objective)
     # Sample for nonnegativity constraint of HJB RHS
     nz = params_dict["nz"]
@@ -105,6 +105,11 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
         plot_value_function_sos(J_star, u_star, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg,
         file_name="convex_sampling_hjb_lower_bound_{}_mesh_{}".format(objective, n_mesh))
 
+    if check_inequality_gap:
+        rhs = -result.GetSolution(RHS)
+        plot_value_function_sos(rhs, u_star, z, params_dict["x_min"], params_dict["x_max"], params_dict["x2z"], deg,
+        file_name="convex_sampling_hjb_lower_bound_inequality_{}_mesh_{}".format(objective, n_mesh))
+        
     return J_star, u_star, z
 
 def verify_sos(J_coeff, params_dict, poly_deg):
@@ -343,7 +348,7 @@ def plot_value_function(coeff, params_dict, poly_func, deg, file_name="pendulum_
     plt.savefig("figures/pendulum/{}_policy_{}.png".format(file_name, deg))
 
 if __name__ == '__main__':
-    poly_deg = 2
+    poly_deg = 4
     print("Deg: ", poly_deg)
     params_dict = pendulum_setup()
     convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=6, objective="integrate_ring")
