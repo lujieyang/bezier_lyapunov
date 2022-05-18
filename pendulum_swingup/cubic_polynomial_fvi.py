@@ -16,6 +16,9 @@ def cubic_setup():
     def f(x, u):
         return np.array([x - 4*x**3 + u])
 
+    def f1(x):
+        return np.array([x - 4*x**3])
+
     f2 = np.array([1])
 
     Q = 1
@@ -23,8 +26,11 @@ def cubic_setup():
 
     def l(x, u):
         return Q*x**2 + R*u**2
+    
+    def l1(x):
+        return Q*x**2
 
-    return {"nz": nz, "f": f, "f2": f2, "l": l, "Rinv": np.diag([1/R]), "z0": z0}
+    return {"nz": nz, "f": f, "f2": f2, "l": l, "R": R, "z0": z0, "l1": l1, "f1":f1, "Rinv":np.diag([1/R])}
 
 
 def nonconvex_hjb_regression(poly_deg, params_dict):
@@ -133,13 +139,16 @@ def convex_sampling_hjb_lower_bound(poly_deg, params_dict):
 
     J_star = result.GetSolution(J_coeff_var).reshape(coeff_shape)
 
-    # assert result.is_success()
+    assert result.is_success()
     print(result.is_success())
     print("area: ", result.get_optimal_cost())
     print("# of quadratic constraints: ", len(
         prog.rotated_lorentz_cone_constraints()))
 
     plot_value_function(J_star, params_dict, poly_func, poly_deg)
+
+    # rhs = -result.GetSolution(RHS)
+    # plot_value_function_sos(rhs, 0, z, poly_deg)
 
     return J_star
 
@@ -336,6 +345,59 @@ def iterative_hjb_sos_lower_bound(poly_deg, params_dict):
     u_star = calc_u_opt(dJdz, f2, params_dict['Rinv'])
     return J_star, u_star, z
 
+def hjb_matrix_sos_lower_bound(poly_deg, params_dict):
+    # Iterative sos hjb lower bound
+    nz = params_dict["nz"]
+    f1 = params_dict["f1"]
+    l1 = params_dict["l1"]
+    f2 = params_dict["f2"]
+    R = params_dict["R"]
+    Rinv = np.diag([1/R])
+    z_max = np.array([1])
+    z_min = -z_max
+
+    prog = MathematicalProgram()
+    z = prog.NewIndeterminates(nz, "z")
+    J = prog.NewFreePolynomial(Variables(z), poly_deg, "J")
+    J_expr = J.ToExpression()
+
+    dJdz = J_expr.Jacobian(z)
+    dJdz_f2 = dJdz.dot(f2)
+    Schur = np.array([[R, dJdz_f2],
+                      [dJdz_f2, 4*(l1(z)+dJdz.dot(f1(z)))[0]]])
+
+    y = prog.NewIndeterminates(1, "y")
+    y1 = np.concatenate((y, [1]))
+    sos_expr = (y1.dot(Schur)).dot(y1)
+    l_deg = 2
+    lam_0 = prog.NewSosPolynomial(Variables(z), l_deg)[0].ToExpression()
+    S_procedure_0 = lam_0 * (z[0]**2 - 1)
+    prog.AddSosConstraint(sos_expr + S_procedure_0)
+
+    # J(z0) = 0
+    J0 = J_expr.EvaluatePartial(dict(zip(z, [params_dict["z0"]])))
+    prog.AddLinearConstraint(J0 == 0)  
+    # Enforce that value function is PD
+    lam_1 = prog.NewSosPolynomial(Variables(z), l_deg)[0].ToExpression()
+    S_procedure_1 = lam_1 * (z[0]**2 - 1)
+    prog.AddSosConstraint(J_expr + S_procedure_1)
+
+    obj = J
+    for i in range(nz):
+        obj = obj.Integrate(z[i], z_min[i], z_max[i])
+    prog.AddCost(-obj.ToExpression())
+
+    result = Solve(prog)
+    assert result.is_success()
+
+    J_star = result.GetSolution(J)
+
+    dJdz = J_star.ToExpression().Jacobian(z)
+    u_star = calc_u_opt(dJdz, f2, Rinv)
+
+    plot_value_function_sos(J_star, u_star, z, poly_deg)
+    return J_star, u_star, z
+
 
 def plot_value_function(coeff, params_dict, poly_func, deg):
     x = np.linspace(-1, 1, 100)
@@ -388,11 +450,12 @@ if __name__ == '__main__':
     x_opt, J_opt = optimal_cost_to_go()
     for poly_deg in range(2, 12, 2):
         print("Deg: ", poly_deg)
-        convex_sampling_hjb_lower_bound(poly_deg, params_dict)
+        # convex_sampling_hjb_lower_bound(poly_deg, params_dict)
+        hjb_matrix_sos_lower_bound(poly_deg, params_dict)
         # fit_optimal_cost_to_go(poly_deg, J_opt, x_opt, params_dict)
         # J, u, z, = iterative_hjb_sos_lower_bound(poly_deg, params_dict)
         # plot_value_function_sos(J, u, z, poly_deg)
 
     plt.plot(x_opt, J_opt.T, 'k', label='J*')
     plt.legend()
-    plt.savefig("J_convex_sampling_hjb_lower_bound.png")
+    plt.savefig("J_hjb_matrix_sos_lower_bound.png")
