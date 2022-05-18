@@ -19,14 +19,13 @@ def acrobot_swingup_example():
     plant_params.set_b2(0)
     simulator = Simulator(plant)
     options = DynamicProgrammingOptions()
-    n_mesh = 21
+    n_mesh = 31
     q1bins = np.linspace(0., 2. * np.pi, n_mesh)
     q2bins = np.linspace(-np.pi/2, np.pi/2, int(n_mesh/2))
     qdotbins = np.linspace(-3., 3., int(n_mesh/2))
     state_grid = [set(q1bins), set(q2bins), set(qdotbins), set(qdotbins)]
     options.periodic_boundary_conditions = [
         PeriodicBoundaryCondition(0, 0., 2. * np.pi),
-        PeriodicBoundaryCondition(1, 0., 2. * np.pi),
     ]
     options.discount_factor = .999
     input_limit = 3.

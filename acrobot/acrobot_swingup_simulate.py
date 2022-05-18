@@ -4,7 +4,7 @@ sys.path.append("../../underactuated")
 
 # %%
 import numpy as np
-from pendulum_swingup.utils import calc_u_opt
+from utils import calc_u_opt
 from acrobot_swingup_fvi import convex_sampling_hjb_lower_bound, acrobot_setup
 from pydrake.examples.acrobot import (AcrobotPlant, AcrobotGeometry)
 from pydrake.all import (DiagramBuilder, Simulator, WrapToSystem, LeafSystem,

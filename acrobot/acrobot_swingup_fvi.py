@@ -6,6 +6,7 @@ from pydrake.solvers import mathematicalprogram as mp
 import pydrake.symbolic as sym
 from pydrake.examples.acrobot import AcrobotGeometry, AcrobotPlant, AcrobotParams
 from pydrake.symbolic import Expression
+import pickle
 
 import matplotlib.pyplot as plt
 from matplotlib import cm
@@ -163,11 +164,11 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
             obj = obj.Integrate(z[i], z_min[i], z_max[i])
         c_r = 1
         cost = 0
-        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
-            s1_deg = monomial.degree(z[0]) 
-            c1_deg = monomial.degree(z[1])
-            s2_deg = monomial.degree(z[2]) 
-            c2_deg = monomial.degree(z[3])
+        for m,coeff in obj.monomial_to_coefficient_map().items(): 
+            s1_deg = m.degree(z[0]) 
+            c1_deg = m.degree(z[1])
+            s2_deg = m.degree(z[2]) 
+            c2_deg = m.degree(z[3])
             monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, 0, 2*np.pi)[0]
             monomial_int2 = quad(lambda x: np.sin(x)**s2_deg * np.cos(x)**c2_deg, 0, 2*np.pi)[0]
             if np.abs(monomial_int1) <=1e-5:
@@ -259,7 +260,13 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
     plt.savefig("acrobot/figures/{}_policy_{}.png".format(file_name, poly_deg))
 
 if __name__ == '__main__':
-    poly_deg = 4
+    poly_deg = 2
+    n_mesh = 15
     print("Deg: ", poly_deg)
     params_dict = acrobot_setup()
-    convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=15, objective="integrate_ring")
+    J_star, z = convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=True)
+
+    C = extract_polynomial_coeff_dict(J_star, z)
+    f = open("acrobot/data/J_{}_{}".format(poly_deg, n_mesh),"wb")
+    pickle.dump(C, f)
+    f.close()
