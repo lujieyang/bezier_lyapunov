@@ -4,11 +4,12 @@ sys.path.append("../../underactuated")
 
 # %%
 import numpy as np
-from pendulum_swingup.utils import calc_u_opt
-from cartpole_swingup_fvi import convex_sampling_hjb_lower_bound, cartpole_setup
+import pickle
+from utils import calc_u_opt, reconstruct_polynomial_from_dict
+from cartpole_swingup_fvi import cartpole_setup
 from pydrake.all import (DiagramBuilder, Simulator, WrapToSystem, LeafSystem,
                          BasicVector, Parser, SceneGraph, AddMultibodyPlantSceneGraph,
-                         Expression, ConnectMeshcatVisualizer)
+                         MathematicalProgram, ConnectMeshcatVisualizer)
 from underactuated import FindResource
 
 from meshcat.servers.zmqserver import start_zmq_server_as_subprocess
@@ -26,8 +27,7 @@ class Controller(LeafSystem):
         self.x2z = params_dict["x2z"]
         self.T = params_dict["T"]
         self.f2 = params_dict["f2"]
-        J_star_expr = J_star.ToExpression()
-        self.dJdz = J_star_expr.Jacobian(z)
+        self.dJdz = J_star.Jacobian(z)
         self.z = z
         
         self.state_input_port = self.DeclareVectorInputPort(
@@ -66,9 +66,6 @@ def simulate(J_star, z, params_dict):
     builder.Connect(vi_policy.get_output_port(0),
                     cartpole.get_actuation_input_port())
 
-    # Setup visualization
-    scene_graph = builder.AddSystem(SceneGraph())
-
     proc, zmq_url, web_url = start_zmq_server_as_subprocess(server_args=[])
     viz = ConnectMeshcatVisualizer(builder, scene_graph, zmq_url=zmq_url)
     # set_orthographic_camera_xy(viz.vis)
@@ -77,7 +74,7 @@ def simulate(J_star, z, params_dict):
     context = simulator.get_mutable_context()
     context.SetContinuousState([0, np.pi-0.1, 0, 0])
     viz.start_recording()
-    simulator.AdvanceTo(5)
+    simulator.AdvanceTo(1)
     viz.publish_recording()
 
 # %%
@@ -89,9 +86,13 @@ def set_orthographic_camera_xy(vis: meshcat.Visualizer) -> None:
 
 # %%
 params_dict = cartpole_setup()
-J_star, z = convex_sampling_hjb_lower_bound(2, params_dict, n_mesh=11,
-                                            objective="integrate_ring", visualize=False)
-
+poly_deg = 4
+n_mesh = 11
+prog = MathematicalProgram()
+z = prog.NewIndeterminates(params_dict["nz"], "z")
+with open("cartpole/data/J_{}_{}.pkl".format(poly_deg, n_mesh), "rb") as input_file:
+    C = pickle.load(input_file)
+J_star = reconstruct_polynomial_from_dict(C, z)
 # %%
 simulate(J_star, z, params_dict)
 

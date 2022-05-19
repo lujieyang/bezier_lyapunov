@@ -4,11 +4,12 @@ sys.path.append("../../underactuated")
 
 # %%
 import numpy as np
-from utils import calc_u_opt
-from acrobot_swingup_fvi import convex_sampling_hjb_lower_bound, acrobot_setup
+import pickle
+from utils import calc_u_opt, reconstruct_polynomial_from_dict
+from acrobot_swingup_fvi import acrobot_setup
 from pydrake.examples.acrobot import (AcrobotPlant, AcrobotGeometry)
 from pydrake.all import (DiagramBuilder, Simulator, WrapToSystem, LeafSystem,
-                         BasicVector, StartMeshcat, SceneGraph, MeshcatVisualizerCpp,
+                         BasicVector, MathematicalProgram, SceneGraph, MeshcatVisualizerCpp,
                          Expression, ConnectMeshcatVisualizer)
 from meshcat.servers.zmqserver import start_zmq_server_as_subprocess
 import meshcat
@@ -28,8 +29,7 @@ class Controller(LeafSystem):
         self.f = params_dict["f"]
         self.l = params_dict["l"]
         self.f2 = params_dict["f2"]
-        J_star_expr = J_star.ToExpression()
-        self.dJdz = J_star_expr.Jacobian(z)
+        self.dJdz = J_star.Jacobian(z)
         self.z = z
         
         self.state_input_port = self.DeclareVectorInputPort(
@@ -56,10 +56,6 @@ def simulate(J_star, z, params_dict):
     # Animate the resulting policy.
     builder = DiagramBuilder()
     plant = AcrobotPlant()
-    context = plant.CreateDefaultContext()
-    plant_params = plant.get_parameters(context)
-    plant_params.set_b1(0)
-    plant_params.set_b2(0)
     acrobot = builder.AddSystem(plant)
     wrap = builder.AddSystem(WrapToSystem(4))
     wrap.set_interval(0, 0, 2*np.pi)
@@ -88,7 +84,7 @@ def simulate(J_star, z, params_dict):
     acrobot_params.set_b2(0)
     context.SetContinuousState([np.pi-0.1, 0, 0, 0])
     viz.start_recording()
-    simulator.AdvanceTo(2)
+    simulator.AdvanceTo(1)
     viz.publish_recording()
 
 # %%
@@ -100,8 +96,13 @@ def set_orthographic_camera_xy(vis: meshcat.Visualizer) -> None:
 
 # %%
 params_dict = acrobot_setup()
-J_star, z = convex_sampling_hjb_lower_bound(2, params_dict, n_mesh=11,
-                                            objective="integrate_ring", visualize=False)
+poly_deg = 4
+n_mesh = 11
+prog = MathematicalProgram()
+z = prog.NewIndeterminates(params_dict["nz"], "z")
+with open("acrobot/data/J_{}_{}.pkl".format(poly_deg, n_mesh), "rb") as input_file:
+    C = pickle.load(input_file)
+J_star = reconstruct_polynomial_from_dict(C, z)
 
 # %%
 simulate(J_star, z, params_dict)
