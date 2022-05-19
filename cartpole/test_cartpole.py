@@ -6,15 +6,23 @@ from underactuated import FindResource
 
 class TestAcrobot(unittest.TestCase):
     def test_M(self):
-        mc = 10
-        mp = 1
-        l = .5
-        g = 9.81
-        c = np.cos(x[1] + np.pi)  # Drake calculation and underactuated notes off by pi
+        c = np.cos(x[1])
         M = np.array([[mc+mp, mp*l*c],
                      [mp*l*c, mp*l**2]])
         M_drake = plant.CalcMassMatrix(context)
         np.testing.assert_allclose(M, M_drake)
+    
+    def test_Cv(self):
+        C = np.zeros([2, 2])
+        C[0, 1] = -mp*l*x[3]*np.sin(x[1])
+        Cv = C @x[2:]
+        Cv_drake = plant.CalcBiasTerm(context)
+        np.testing.assert_allclose(Cv, Cv_drake)
+
+    def test_tau(self):
+        tau = np.array([0,-mp*g*l*np.sin(x[1])])
+        tau_drake = plant.CalcGravityGeneralizedForces(context)
+        np.testing.assert_allclose(tau, tau_drake)
 
     def test_time_derivatives(self):
         T_val = params_dict["T"](params_dict["x2z"](x))
@@ -24,7 +32,18 @@ class TestAcrobot(unittest.TestCase):
         plant.get_actuation_input_port().FixValue(context, u)
         f = plant.AllocateTimeDerivatives()
         plant.CalcTimeDerivatives(context, f)
-        # np.testing.assert_allclose(f_val.astype(float), T_val@f.CopyToVector())
+
+        c = np.cos(x[1])
+        M = np.array([[mc+mp, mp*l*c],
+                     [mp*l*c, mp*l**2]])
+        C = np.zeros([2, 2])
+        C[0, 1] = -mp*l*x[3]*np.sin(x[1])
+        Cv = C @x[2:]
+        tau = np.array([0,-mp*g*l*np.sin(x[1])])
+
+        vdot_matrix = np.linalg.inv(M)@(tau + np.array([u, 0]) - Cv)
+
+        np.testing.assert_allclose(f_val.astype(float), T_val@f.CopyToVector())
 
 if __name__ == '__main__':
     builder = DiagramBuilder()
@@ -35,5 +54,11 @@ if __name__ == '__main__':
     x = np.random.random(4)
     context = plant.CreateDefaultContext()
     context.SetContinuousState(x)
+
     params_dict = cartpole_setup()
+    mc = 10
+    mp = 1
+    l = .5
+    g = 9.81
+
     unittest.main()
