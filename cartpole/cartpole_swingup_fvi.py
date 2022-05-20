@@ -7,6 +7,8 @@ from pydrake.solvers import mathematicalprogram as mp
 import pydrake.symbolic as sym
 from pydrake.symbolic import Expression
 
+from scipy.special import comb
+
 import matplotlib.pyplot as plt
 from matplotlib import cm
 
@@ -178,6 +180,86 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
         plot_value_function(J_star, z, params_dict, deg,
         file_name="convex_sampling_hjb_lower_bound_{}_mesh_{}".format(objective, n_mesh))
 
+    return J_star, z, prog, J_expr
+
+def random_sample_adversarial_pts(J, z, params_dict, n_sample=500):
+    nz = params_dict["nz"]
+    T = params_dict["T"]
+    f = params_dict["f"]
+    l_cost = params_dict["l_cost"]
+    f2 = params_dict["f2"]
+    x2z = params_dict["x2z"]
+    x_min = params_dict["x_min"]
+    x_max = params_dict["x_max"]
+    X = np.random.rand(n_sample).reshape(n_sample, 1) * (x_max-x_min) + x_min
+
+    dJdz = J.Jacobian(z)
+
+    adv_samples = []
+    for x in X:
+        z_val = x2z(x)
+        T_val = T(z_val)
+        f2_val = f2(x, T_val)
+        dJdz_val = np.zeros(nz)
+        for n in range(nz): 
+            dJdz_val[n] = dJdz[n].Evaluate(dict(zip(z, z_val)))
+        u_opt = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
+        f_val = f(x, u_opt, T_val)
+        if (l_cost(z_val, u_opt) + dJdz_val.dot(f_val)) < 0:
+            adv_samples.append(x)
+    return adv_samples
+
+def adversarial_sample_convex_hjb_lower_bound(prog, J_star, z, J_expr, params_dict):
+    nz = params_dict["nz"]
+    T = params_dict["T"]
+    f = params_dict["f"]
+    l_cost = params_dict["l_cost"]
+    f2 = params_dict["f2"]
+    x2z = params_dict["x2z"]
+
+    dJdz = J_expr.Jacobian(z)
+
+    for i in range(10):
+        adv_samples = random_sample_adversarial_pts(J_star, z, params_dict, 2000)
+        num_adv = len(adv_samples)
+        print("Iteration: {}, number of adversarial samples: {}".format(i, num_adv))
+        if  num_adv == 0:
+            break
+        for x in adv_samples:
+            z_val = x2z(x)
+            z_val[np.abs(z_val)<=1e-6] = 0
+            prog.AddLinearConstraint(J_expr.EvaluatePartial(dict(zip(z, z_val))) >= 0)
+            # RHS of HJB
+            T_val = T(z_val)
+            f2_val = f2(x, T_val)
+            dJdz_val = np.zeros(nz, dtype=Expression)
+            for n in range(nz): 
+                dJdz_val[n] = dJdz[n].EvaluatePartial(dict(zip(z, z_val)))
+            u_opt = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
+            f_val = f(x, u_opt, T_val)
+            constr = -(l_cost(z_val, u_opt) + dJdz_val.dot(f_val))
+            poly = Polynomial(constr)
+            poly = poly.RemoveTermsWithSmallCoefficients(1e-6)
+            variables, map_var_to_index = sym.ExtractVariablesFromExpression(
+                constr)
+            Q, b, c = sym.DecomposeQuadraticPolynomial(poly, map_var_to_index)
+            try:
+                prog.AddQuadraticAsRotatedLorentzConeConstraint(
+                    Q, b, c, variables, psd_tol=1e-5)
+            except:
+                pass
+
+        print("="*10, "Solving","="*20)
+        solve_start = time.time()
+        result = Solve(prog)
+        solve_end = time.time()
+        print("Time for solving: ", solve_end-solve_start)
+
+        J_star = Polynomial(result.GetSolution(J_expr))
+    
+    plot_value_function(J_star, z, params_dict, poly_deg,
+        file_name="adversarial_convex_sampling_hjb_lower_bound_mesh_{}".format(n_mesh))
+
     return J_star, z
 
 def plot_value_function(J_star, z, params_dict, poly_deg, file_name="", check_inequality_gap=True):
@@ -221,7 +303,7 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name="", check_in
     ax.set_title("Cost-to-Go")
     im = ax.imshow(J.reshape(X1.shape),
             cmap=cm.jet, aspect='auto',
-            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+            extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
     plt.savefig("cartpole/figures/{}_{}.png".format(file_name, poly_deg))
@@ -233,7 +315,7 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name="", check_in
     ax.set_title("Policy")
     im = ax.imshow(U.reshape(X1.shape),
             cmap=cm.jet, aspect='auto',
-            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+            extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
     plt.savefig("cartpole/figures/{}_policy_{}.png".format(file_name, poly_deg))
@@ -246,20 +328,22 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name="", check_in
         ax.set_title("Bellman Inequality")
         im = ax.imshow(RHS.reshape(X1.shape),
                 cmap=cm.jet, aspect='auto',
-                extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+                extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
         ax.invert_yaxis()
         fig.colorbar(im)
         plt.savefig("cartpole/figures/{}_inequality_{}.png".format(file_name, poly_deg))
 
 
 if __name__ == '__main__':
-    poly_deg = 2
+    poly_deg = 4
     n_mesh = 6
     print("Deg: ", poly_deg)
+    print("Mesh needed: ", comb(poly_deg+5, 5)**0.25)
     params_dict = cartpole_setup()
-    J_star, z = convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=True)
+    J_star, z, prog, J_expr = convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=False)
+    adversarial_sample_convex_hjb_lower_bound(prog, J_star, z, J_expr, params_dict)
 
     C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("cartpole/data/J_{}_{}".format(poly_deg, n_mesh),"wb")
+    f = open("cartpole/data/J_{}_{}.pkl".format(poly_deg, n_mesh),"wb")
     pickle.dump(C, f)
     f.close()
