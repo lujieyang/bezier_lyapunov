@@ -29,8 +29,8 @@ def cartpole_setup():
     # z = (x, s, c, xdot, thetadot)
     x2z = lambda x : np.array([x[0], np.sin(x[1]), np.cos(x[1]), x[2], x[3]])
 
-    def T(z):
-        T = np.zeros([nz, nx])
+    def T(z, dtype=float):
+        T = np.zeros([nz, nx], dtype=dtype)
         T[0, 0] = 1
         T[1, 1] = z[2]
         T[2, 1] = -z[1]
@@ -48,10 +48,10 @@ def cartpole_setup():
         f_val[3] = ((-u*c - mp*l*qdot[1]**2*c*s - (mc+mp)*g*s)/(mc+mp*s**2)/l)[0]
         return T @ f_val 
     
-    def f2(x, T):
+    def f2(x, T, dtype=float):
         s = np.sin(x[1])
         c = np.cos(x[1])
-        f2_val = np.zeros([nx, nu])
+        f2_val = np.zeros([nx, nu], dtype=dtype)
         f2_val[2, :] = 1/(mc+mp*s**2)
         f2_val[3, :] =-c/(mc+mp*s**2)/l
         return T@f2_val
@@ -74,7 +74,7 @@ def cartpole_setup():
 
     Rinv = np.linalg.inv(R)
     params_dict = {"x_min": x_min, "x_max": x_max, "x2z":x2z, "f":f, "l_cost":l_cost,
-                   "nz": nz, "f2": f2, "Rinv": Rinv, "z0": z0, "T":T, "nq": nq}
+                   "nz": nz, "f2": f2, "Rinv": Rinv, "z0": z0, "T":T, "nq": nq, "nx": nx}
     return params_dict
 
 def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", visualize=True):
@@ -209,7 +209,53 @@ def random_sample_adversarial_pts(J, z, params_dict, n_sample=500):
             adv_samples.append(x)
     return adv_samples
 
-def adversarial_sample_convex_hjb_lower_bound(prog, J_star, z, J_expr, params_dict):
+def worst_sample_nonlinear_optimization(J, z, params_dict, n_adv_samples=0, r=0.5):
+    nz = params_dict["nz"]
+    T = params_dict["T"]
+    f = params_dict["f"]
+    l_cost = params_dict["l_cost"]
+    f2 = params_dict["f2"]
+    x2z = params_dict["x2z"]
+    prog = MathematicalProgram()
+    x = prog.NewContinuousVariables(params_dict["nx"])
+
+    # def foo(x):
+    #     dJdz = J.Jacobian(z)
+    #     z_val = x2z(x)
+    #     T_val = T(z_val, dtype=Expression)
+    #     f2_val = f2(x, T_val, dtype=Expression)
+    #     dJdz_val = np.zeros(nz, dtype=Expression)
+    #     for n in range(nz): 
+    #         C = extract_polynomial_coeff_dict(dJdz[n], z)
+    #         dJdz_val[n] = reconstruct_polynomial_from_dict(C, z_val)
+    #     u_opt = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
+    #     f_val = f(x, u_opt, T_val)
+    #     return l_cost(z_val, u_opt) + dJdz_val.dot(f_val)
+    # prog.AddCost(foo, x)
+
+    dJdz = J.Jacobian(z)
+    z_val = x2z(x)
+    T_val = T(z_val, dtype=Expression)
+    f2_val = f2(x, T_val, dtype=Expression)
+    dJdz_val = np.zeros(nz, dtype=Expression)
+    for n in range(nz): 
+        C = extract_polynomial_coeff_dict(dJdz[n], z)
+        dJdz_val[n] = reconstruct_polynomial_from_dict(C, z_val)
+    u_opt = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
+    f_val = f(x, u_opt, T_val)
+
+    prog.AddConstraint(l_cost(z_val, u_opt) + dJdz_val.dot(f_val)<=-1)
+
+    result = Solve(prog)
+
+    if result.is_success():
+        x_adv = result.GetSolution(x)
+        X = np.random.rand(n_adv_samples).reshape(n_adv_samples, 1) * r + x_adv
+        return np.vstack((x_adv, X))
+
+    return []
+
+def adversarial_sample_convex_hjb_lower_bound(prog, J_star, z, J_expr, params_dict, adversarial_mode="random"):
     nz = params_dict["nz"]
     T = params_dict["T"]
     f = params_dict["f"]
@@ -219,12 +265,18 @@ def adversarial_sample_convex_hjb_lower_bound(prog, J_star, z, J_expr, params_di
 
     dJdz = J_expr.Jacobian(z)
 
-    for i in range(10):
-        adv_samples = random_sample_adversarial_pts(J_star, z, params_dict, 2000)
+    for i in range(20):
+        if adversarial_mode == "random":
+            adv_samples = random_sample_adversarial_pts(J_star, z, params_dict, 5000)
+        elif adversarial_mode == "worst":
+            adv_samples = worst_sample_nonlinear_optimization(J_star, z, params_dict)
         num_adv = len(adv_samples)
         print("Iteration: {}, number of adversarial samples: {}".format(i, num_adv))
         if  num_adv == 0:
-            break
+            if adversarial_mode == "worst":
+                break
+            else:
+                adversarial_mode = "worst"
         for x in adv_samples:
             z_val = x2z(x)
             z_val[np.abs(z_val)<=1e-6] = 0
@@ -335,15 +387,19 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name="", check_in
 
 
 if __name__ == '__main__':
-    poly_deg = 4
-    n_mesh = 6
+    poly_deg = 2
+    n_mesh = 11
+    adversarial = True
+    folder_name = "cartpole/data"
     print("Deg: ", poly_deg)
     print("Mesh needed: ", comb(poly_deg+5, 5)**0.25)
     params_dict = cartpole_setup()
     J_star, z, prog, J_expr = convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=False)
-    adversarial_sample_convex_hjb_lower_bound(prog, J_star, z, J_expr, params_dict)
+    if adversarial:
+        J_star, z = adversarial_sample_convex_hjb_lower_bound(prog, J_star, z, J_expr, params_dict)
+        folder_name += "/adversarial"
 
     C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("cartpole/data/J_{}_{}.pkl".format(poly_deg, n_mesh),"wb")
+    f = open("{}/J_{}_{}.pkl".format(folder_name, poly_deg, n_mesh),"wb")
     pickle.dump(C, f)
     f.close()
