@@ -77,7 +77,7 @@ def acrobot_setup():
     z0[np.abs(z0)<=1e-6] = 0
         
     # Quadratic running cost in augmented state.
-    Q = np.diag(np.ones(nz)) * 2
+    Q = np.diag([10, 10, 10, 10, 1, 1])
     R = np.diag([1]) 
     def l(z, u):
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
@@ -242,7 +242,7 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
     ax.set_title("Cost-to-Go")
     im = ax.imshow(J.reshape(X1.shape),
             cmap=cm.jet, aspect='auto',
-            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+            extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
     plt.savefig("acrobot/figures/{}_{}.png".format(file_name, poly_deg))
@@ -254,7 +254,7 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name=""):
     ax.set_title("Policy")
     im = ax.imshow(U.reshape(X1.shape),
             cmap=cm.jet, aspect='auto',
-            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+            extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
     plt.savefig("acrobot/figures/{}_policy_{}.png".format(file_name, poly_deg))
@@ -267,6 +267,6 @@ if __name__ == '__main__':
     J_star, z = convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=True)
 
     C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("acrobot/data/J_{}_{}".format(poly_deg, n_mesh),"wb")
+    f = open("acrobot/data/J_{}_{}.pkl".format(poly_deg, n_mesh),"wb")
     pickle.dump(C, f)
     f.close()

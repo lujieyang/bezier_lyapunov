@@ -330,7 +330,7 @@ def plot_value_function(coeff, params_dict, poly_func, deg, file_name="pendulum_
     ax.set_title("Cost-to-Go")
     im = ax.imshow(J,
             cmap=cm.jet, aspect='auto',
-            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+            extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
     plt.savefig("figures/pendulum/{}_value_function_{}.png".format(file_name, deg))
@@ -342,7 +342,7 @@ def plot_value_function(coeff, params_dict, poly_func, deg, file_name="pendulum_
     ax.set_title("Optimal Policy")
     im = ax.imshow(U,
             cmap=cm.jet, aspect='auto',
-            extent=(x_min[0], x_max[0], x_min[1], x_max[1]))
+            extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
     plt.savefig("figures/pendulum/{}_policy_{}.png".format(file_name, deg))
