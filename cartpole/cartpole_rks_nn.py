@@ -59,7 +59,7 @@ def cartpole_setup(dtype=torch.float64):
                    "nz": nz, "f2": f2, "Rinv": Rinv, "nq": nq, "nx": nx}
     return params_dict
 
-def convex_sampling_hjb_lower_bound(K, params_dict, n_mesh=6, eps=1e-5, visualize=True):
+def convex_sampling_hjb_lower_bound(K, params_dict, h_layer=32, n_mesh=6, eps=1e-5, visualize=True):
     # Sample for nonnegativity constraint of HJB RHS
     nx = params_dict["nx"]
     f1 = params_dict["f1"]
@@ -73,7 +73,7 @@ def convex_sampling_hjb_lower_bound(K, params_dict, n_mesh=6, eps=1e-5, visualiz
     alpha = prog.NewContinuousVariables(K, "alpha")
     sinks = []
     for _ in range(K):
-        sinks.append(setup_nn((nx, 32, 32, 1)))
+        sinks.append(setup_nn((nx, h_layer, h_layer, 1)))
 
     mesh_pts = []
     for i in range(nx):
@@ -147,7 +147,7 @@ def convex_sampling_hjb_lower_bound(K, params_dict, n_mesh=6, eps=1e-5, visualiz
 
     if visualize:
         plot_value_function(alpha_star, params_dict, sinks, K,
-        file_name="mesh_{}".format(n_mesh))
+        file_name="h_layer_{}_mesh_{}_K_{}".format(h_layer, n_mesh, K))
 
     return alpha_star, sinks
 
@@ -199,9 +199,6 @@ def plot_value_function(alpha_star, params_dict, sinks, K, file_name="", check_i
     # X = torch.vstack((X1.flatten(), X2.flatten(), torch.random.random(51*51), torch.random.random(51*51)))
     X = torch.vstack((X1.flatten(), X2.flatten(), torch.zeros(51*51, dtype=dtype), torch.zeros(51*51, dtype=dtype))).T
     X.requires_grad = True
-    J = np.zeros(X.shape[0])
-    U = np.zeros(X.shape[0])
-    RHS = np.zeros(X.shape[0])
 
     basis = sinks[0](X)
     dPhi_dx = grad(basis, X, grad_outputs=torch.ones_like(basis))[0].unsqueeze(2)
@@ -231,19 +228,21 @@ def plot_value_function(alpha_star, params_dict, sinks, K, file_name="", check_i
             extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("cartpole/figures/rks_nn/{}_{}.png".format(file_name, K))
+    plt.savefig("cartpole/figures/rks_nn/{}.png".format(file_name))
 
-    # fig = plt.figure(figsize=(9, 4))
-    # ax = fig.subplots()
-    # ax.set_xlabel("x")
-    # ax.set_ylabel("theta")
-    # ax.set_title("Policy")
-    # im = ax.imshow(U.reshape(X1.shape),
-    #         cmap=cm.jet, aspect='auto',
-    #         extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
-    # ax.invert_yaxis()
-    # fig.colorbar(im)
-    # plt.savefig("cartpole/figures/rks_nn/{}_policy_{}.png".format(file_name, K))
+    U = - torch.einsum("ij, bjk->bik",Rinv, f2_dJdx)/2
+    U = U.squeeze().detach().numpy()
+    fig = plt.figure(figsize=(9, 4))
+    ax = fig.subplots()
+    ax.set_xlabel("x")
+    ax.set_ylabel("theta")
+    ax.set_title("Policy")
+    im = ax.imshow(U.reshape(X1.shape),
+            cmap=cm.jet, aspect='auto',
+            extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
+    ax.invert_yaxis()
+    fig.colorbar(im)
+    plt.savefig("cartpole/figures/rks_nn/{}_policy.png".format(file_name))
 
     RHS = (l1 - (quadratic/4).squeeze() + dJdx_f1.squeeze()).detach().numpy()
     if check_inequality_gap:
@@ -257,16 +256,17 @@ def plot_value_function(alpha_star, params_dict, sinks, K, file_name="", check_i
                 extent=(x_min[0], x_max[0], x_max[1], x_min[1]))
         ax.invert_yaxis()
         fig.colorbar(im)
-        plt.savefig("cartpole/figures/rks_nn/{}_inequality_{}.png".format(file_name, K))
+        plt.savefig("cartpole/figures/rks_nn/{}_inequality.png".format(file_name))
 
 if __name__ == '__main__':
-    K = 200
+    K = 20
     n_mesh = 10
+    h_layer = 64
     params_dict = cartpole_setup()
     torch.random.manual_seed(88)
-    alpha, sinks = convex_sampling_hjb_lower_bound(K, params_dict, n_mesh=n_mesh, visualize=True)
+    alpha, sinks = convex_sampling_hjb_lower_bound(K, params_dict, h_layer=h_layer, n_mesh=n_mesh, visualize=True)
 
     sink_dict = {"alpha": alpha}
     for k in range(K):
         sink_dict[k] = sinks[k]
-    torch.save(sink_dict, "cartpole/data/rks_nn/alpha_{}_sink_{}.pth".format(K, n_mesh))
+    torch.save(sink_dict, "cartpole/data/rks_nn/alpha_{}_sink_{}_mesh_{}_hidden.pth".format(K, n_mesh, h_layer))
