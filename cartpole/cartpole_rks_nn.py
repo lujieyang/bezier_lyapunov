@@ -59,7 +59,7 @@ def cartpole_setup(dtype=torch.float64):
                    "nz": nz, "f2": f2, "Rinv": Rinv, "nq": nq, "nx": nx}
     return params_dict
 
-def convex_sampling_hjb_lower_bound(K, params_dict, h_layer=32, n_mesh=6, eps=1e-5, visualize=True):
+def convex_sampling_hjb_lower_bound(K, params_dict, h_layer=16, activation_type="tanh", n_mesh=6, eps=1e-5, visualize=True):
     # Sample for nonnegativity constraint of HJB RHS
     nx = params_dict["nx"]
     f1 = params_dict["f1"]
@@ -73,7 +73,7 @@ def convex_sampling_hjb_lower_bound(K, params_dict, h_layer=32, n_mesh=6, eps=1e
     alpha = prog.NewContinuousVariables(K, "alpha")
     sinks = []
     for _ in range(K):
-        sinks.append(setup_nn((nx, h_layer, h_layer, 1)))
+        sinks.append(setup_nn((nx, h_layer, h_layer, 1), activation_type=activation_type))
 
     mesh_pts = []
     for i in range(nx):
@@ -120,7 +120,7 @@ def convex_sampling_hjb_lower_bound(K, params_dict, h_layer=32, n_mesh=6, eps=1e
     end_time = time.time()
     print("Time for adding constraints: ", end_time-start_time)
 
-    integral = torch.trapz(basis, dim=0)
+    integral = torch.sum(basis, dim=0)
     prog.AddLinearCost(-integral.detach().numpy(), alpha)
 
     # J(x0) = 0
@@ -147,7 +147,7 @@ def convex_sampling_hjb_lower_bound(K, params_dict, h_layer=32, n_mesh=6, eps=1e
 
     if visualize:
         plot_value_function(alpha_star, params_dict, sinks, K,
-        file_name="h_layer_{}_mesh_{}_K_{}".format(h_layer, n_mesh, K))
+        file_name="{}/h_layer_{}_mesh_{}_K_{}".format(activation_type, h_layer, n_mesh, K))
 
     return alpha_star, sinks
 
@@ -217,7 +217,7 @@ def plot_value_function(alpha_star, params_dict, sinks, K, file_name="", check_i
     f1_val = f1(X)
     dJdx_f1 = torch.bmm(torch.transpose(dJdx, 1, 2), f1_val.unsqueeze(2))
 
-    J = basis.detach().numpy() @ alpha_star * 1e3
+    J = basis.detach().numpy() @ alpha_star
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
     ax.set_xlabel("x")
@@ -259,14 +259,15 @@ def plot_value_function(alpha_star, params_dict, sinks, K, file_name="", check_i
         plt.savefig("cartpole/figures/rks_nn/{}_inequality.png".format(file_name))
 
 if __name__ == '__main__':
-    K = 20
+    K = 200
     n_mesh = 10
-    h_layer = 64
+    h_layer = 16
+    activation_type = "tanh"
     params_dict = cartpole_setup()
     torch.random.manual_seed(88)
-    alpha, sinks = convex_sampling_hjb_lower_bound(K, params_dict, h_layer=h_layer, n_mesh=n_mesh, visualize=True)
+    alpha, sinks = convex_sampling_hjb_lower_bound(K, params_dict, h_layer=h_layer, activation_type=activation_type, n_mesh=n_mesh, visualize=True)
 
     sink_dict = {"alpha": alpha}
     for k in range(K):
-        sink_dict[k] = sinks[k]
-    torch.save(sink_dict, "cartpole/data/rks_nn/alpha_{}_sink_{}_mesh_{}_hidden.pth".format(K, n_mesh, h_layer))
+        sink_dict[k] = sinks[k].state_dict()
+    torch.save(sink_dict, "cartpole/data/rks_nn/{}/alpha_{}_sink_{}_mesh_{}_hidden.pth".format(activation_type, K, n_mesh, h_layer))
