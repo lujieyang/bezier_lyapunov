@@ -1,7 +1,7 @@
 import time
 from utils import *
 import pickle
-from pydrake.all import (Solve, SolverOptions, CommonSolverOption, Polynomial, Variables)
+from pydrake.all import (Solve, SolverOptions, CommonSolverOption, Polynomial, Variables, ge)
 from scipy.integrate import quad
 from pydrake.solvers import mathematicalprogram as mp
 import pydrake.symbolic as sym
@@ -57,8 +57,8 @@ def cartpole_setup():
         return T@f2_val
 
     # State limits (region of state space where we approximate the value function).
-    x_max = np.array([2, 2*np.pi, 3, 3])
-    x_min = np.array([-2, 0, -3, -3])
+    x_max = np.array([2, 2*np.pi, 6, 6])
+    x_min = np.array([-2, 0, -6, -6])
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([0, np.pi, 0, 0])
@@ -99,6 +99,7 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
     mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
 
     start_time = time.time()
+    J_val = []
     for i in range(n_mesh):
         print("Mesh x0 No.", i)
         position = mesh_pts[i, 0]
@@ -111,7 +112,7 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
                     x = np.array([position, theta, xdot, thetadot])
                     z_val = x2z(x)
                     z_val[np.abs(z_val)<=1e-6] = 0
-                    prog.AddLinearConstraint(J_expr.EvaluatePartial(dict(zip(z, z_val))) >= 0)
+                    J_val.append(J_expr.EvaluatePartial(dict(zip(z, z_val))))
                     # RHS of HJB
                     T_val = T(z_val)
                     f2_val = f2(x, T_val)
@@ -131,6 +132,7 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
                             Q, b, c, variables, psd_tol=1e-5)
                     except:
                         pass
+    prog.AddLinearConstraint(ge(np.array(J_val), 0))
     end_time = time.time()
     print("Time for adding constraints: ", end_time-start_time)
 
@@ -181,6 +183,110 @@ def convex_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", vi
         file_name="convex_sampling_hjb_lower_bound_{}_mesh_{}".format(objective, n_mesh))
 
     return J_star, z, prog, J_expr
+
+def lp_sampling_hjb_lower_bound(deg, params_dict, n_mesh=6, objective="", visualize=True):
+    print("Objective: ", objective)
+    # Sample for nonnegativity constraint of HJB RHS
+    nz = params_dict["nz"]
+    T = params_dict["T"]
+    f = params_dict["f"]
+    l_cost = params_dict["l_cost"]
+    f2 = params_dict["f2"]
+    x2z = params_dict["x2z"]
+    z_max = np.array([2, 1, 1, 3, 3])
+    z_min = -z_max
+    u_max = np.array([300])
+    u_min = -u_max
+    u0 = np.zeros(1)
+    K = np.load("cartpole/data/K.npy")
+
+    prog = MathematicalProgram()
+    z = prog.NewIndeterminates(nz, "z")
+    J = prog.NewFreePolynomial(Variables(z), deg)
+    J_expr = J.ToExpression()
+    
+    dJdz = J_expr.Jacobian(z)
+
+    mesh_pts = np.linspace(params_dict["x_min"], params_dict["x_max"], n_mesh)
+
+    start_time = time.time()
+    nonnegative = []
+    for i in range(n_mesh):
+        print("Mesh x0 No.", i)
+        position = mesh_pts[i, 0]
+        for j in range(n_mesh):
+            theta = mesh_pts[j, 1]
+            for k in range(n_mesh):
+                xdot = mesh_pts[k, 2]
+                for h in range(n_mesh):
+                    thetadot = mesh_pts[h, 3]
+                    x = np.array([position, theta, xdot, thetadot])
+                    z_val = x2z(x)
+                    z_val[np.abs(z_val)<=1e-6] = 0
+                    nonnegative.append(J_expr.EvaluatePartial(dict(zip(z, z_val))))
+                    # RHS of HJB
+                    T_val = T(z_val)
+                    f2_val = f2(x, T_val)
+                    dJdz_val = np.zeros(nz, dtype=Expression)
+                    for n in range(nz): 
+                        dJdz_val[n] = dJdz[n].EvaluatePartial(dict(zip(z, z_val)))
+                    u_lqr = np.array([- K @ x])
+                    f_val = f(x, u_lqr, T_val)
+                    nonnegative.append((l_cost(z_val, u_lqr) + dJdz_val.dot(f_val)))
+                    for u in np.linspace(u_min, u_max, 31):
+                        f_val = f(x, u, T_val)
+                        nonnegative.append((l_cost(z_val, u) + dJdz_val.dot(f_val)))
+    prog.AddLinearConstraint(ge(np.array(nonnegative), 0))
+    end_time = time.time()
+    print("Time for adding constraints: ", end_time-start_time)
+
+    if objective=="integrate_all":
+        obj = J
+        for i in range(nz):
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        prog.AddCost(-obj.ToExpression())
+    elif objective=="integrate_ring":
+        obj = J
+        for i in range(3, nz):
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        c_r = 1
+        cost = 0
+        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+            s1_deg = monomial.degree(z[1]) 
+            c1_deg = monomial.degree(z[2])
+            monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, 0, 2*np.pi)[0]
+            if np.abs(monomial_int1) <=1e-5:
+                monomial_int1 = 0
+            cost += monomial_int1 * coeff
+        prog.AddLinearCost(-c_r * cost)
+
+    # J(z0) = 0
+    J0 = J_expr.EvaluatePartial(dict(zip(z, params_dict["z0"])))
+    prog.AddLinearConstraint(J0 == 0)
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+
+    print("="*10, "Solving","="*20)
+    solve_start = time.time()
+    result = Solve(prog)
+    solve_end = time.time()
+    print("Time for solving: ", solve_end-solve_start)
+
+    J_star = result.GetSolution(J)
+
+    # assert result.is_success()
+    print(result.is_success())
+    print("area: ", result.get_optimal_cost())
+    print("# of quadratic constraints: ", len(
+        prog.rotated_lorentz_cone_constraints()))
+
+    dJdz = J_star.ToExpression().Jacobian(z)
+    if visualize:
+        plot_value_function(J_star, z, params_dict, deg,
+        file_name="lp/{}_mesh_{}".format(objective, n_mesh))
+
+    return J_star, z
 
 def random_sample_adversarial_pts(J, z, params_dict, n_sample=500):
     nz = params_dict["nz"]
@@ -328,6 +434,7 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name="", check_in
 
     X1, X2 = np.meshgrid(np.linspace(x_min[0], x_max[0], 51),
                     np.linspace(x_min[1], x_max[1], 51))
+    # X = np.vstack((X1.flatten(), X2.flatten(), np.random.random(51*51), np.random.random(51*51)))
     X = np.vstack((X1.flatten(), X2.flatten(), np.zeros(51*51), np.zeros(51*51)))
     Z = x2z(X)
     J = np.zeros(Z.shape[1])
@@ -387,14 +494,15 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name="", check_in
 
 
 if __name__ == '__main__':
-    poly_deg = 2
+    poly_deg = 4
     n_mesh = 11
-    adversarial = True
-    folder_name = "cartpole/data"
+    adversarial = False
+    folder_name = "cartpole/data/"
     print("Deg: ", poly_deg)
     print("Mesh needed: ", comb(poly_deg+5, 5)**0.25)
     params_dict = cartpole_setup()
-    J_star, z, prog, J_expr = convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=False)
+    J_star, z, prog, J_expr = convex_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=True)
+    # J_star, z = lp_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=True)
     if adversarial:
         J_star, z = adversarial_sample_convex_hjb_lower_bound(prog, J_star, z, J_expr, params_dict)
         folder_name += "/adversarial"
