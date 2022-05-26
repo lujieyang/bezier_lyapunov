@@ -81,8 +81,8 @@ def convex_sampling_hjb_lower_bound(K, params_dict, h_layer=16, activation_type=
         if i % 1000 == 0:
             print("Mesh x0 No.", i)
         c = -l1[i].detach().numpy() *1e3
-        b = -dPhi_dx_f1[i].detach().numpy() *1e3
-        Qin = Q_batch[i].detach().numpy()/4 *1e3
+        b = -dPhi_dx_f1[i].detach().numpy().squeeze() *1e3
+        Qin = 2* Q_batch[i].detach().numpy()/4 *1e3 # IMPORTANT: 0.5*x'*Q*x + b'*x + c <=0
         try:
             prog.AddQuadraticAsRotatedLorentzConeConstraint(
                 Qin, b, c, alpha, psd_tol=1e-8)
@@ -210,7 +210,7 @@ if __name__ == '__main__':
     print("mesh: {}, activation: {}".format(n_mesh, activation_type))
     params_dict = cubic_setup()
     torch.random.manual_seed(88)
-    for K in range(20, 101, 10):
+    for K in range(8, 20, 4):
         print("K = ", K)
         alpha, sinks = convex_sampling_hjb_lower_bound(K, params_dict, h_layer=h_layer, activation_type=activation_type, n_mesh=n_mesh, lam=5e-4, visualize=True)
 
