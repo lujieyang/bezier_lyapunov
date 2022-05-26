@@ -45,8 +45,9 @@ class Controller(LeafSystem):
         for n in range(self.nz): 
             dJdz_val[n] = self.dJdz[n].Evaluate(dict(zip(z, z_val)))
         u_opt = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
-        y[:]  = u_opt
-        print(u_opt)
+        y[:] = np.clip(u_opt, -300, 300)
+        # if (x<=params_dict["x_min"]).any() or (x>=params_dict["x_max"]).any():
+        #     print(x)
 
 # %%
 def simulate(J_star, z, params_dict):
@@ -58,6 +59,7 @@ def simulate(J_star, z, params_dict):
     cartpole.Finalize()
 
     wrap = builder.AddSystem(WrapToSystem(4))
+    # wrap.set_interval(0, -2, 2)
     wrap.set_interval(1, 0, 2*np.pi)
     builder.Connect(cartpole.get_state_output_port(), wrap.get_input_port(0))
     vi_policy = Controller(J_star, z, cartpole, params_dict)
@@ -68,13 +70,13 @@ def simulate(J_star, z, params_dict):
 
     proc, zmq_url, web_url = start_zmq_server_as_subprocess(server_args=[])
     viz = ConnectMeshcatVisualizer(builder, scene_graph, zmq_url=zmq_url)
-    # set_orthographic_camera_xy(viz.vis)
+    set_orthographic_camera_xy(viz.vis)
     diagram = builder.Build()
     simulator = Simulator(diagram)
     context = simulator.get_mutable_context()
-    context.SetContinuousState([0, np.pi-0.1, 0, 0])
+    context.SetContinuousState([0, np.pi-0.55, 0, 0])
     viz.start_recording()
-    simulator.AdvanceTo(1)
+    simulator.AdvanceTo(15)
     viz.publish_recording()
 
 # %%
@@ -87,10 +89,10 @@ def set_orthographic_camera_xy(vis: meshcat.Visualizer) -> None:
 # %%
 params_dict = cartpole_setup()
 poly_deg = 4
-n_mesh = 11
+n_mesh = 21
 prog = MathematicalProgram()
 z = prog.NewIndeterminates(params_dict["nz"], "z")
-with open("cartpole/data/J_{}_{}.pkl".format(poly_deg, n_mesh), "rb") as input_file:
+with open("cartpole/data/small_state/J_{}_{}.pkl".format(poly_deg, n_mesh), "rb") as input_file:
     C = pickle.load(input_file)
 J_star = reconstruct_polynomial_from_dict(C, z)
 # %%
