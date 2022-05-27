@@ -61,3 +61,27 @@ def reconstruct_polynomial_from_dict(C, z):
             m *= z[i]**monomial[i]
         poly += m * C[monomial]
     return poly
+
+
+def construct_monomial_basis_from_polynomial(J, nJ, z):
+    nz = len(z)
+    C = {}
+    for m, coeff in J.monomial_to_coefficient_map().items():
+        basis =[]
+        for i in range(nz):
+            basis.append(m.degree(z[i]))
+        s = coeff.GetVariables().to_string()
+        idx = int(s[s.find('(')+1:s.find(')')])
+        c = coeff.Evaluate({list(coeff.GetVariables())[0]:1})
+        C[idx] = (c, np.array(basis))
+
+    def calc_basis(x):
+        assert len(x.shape) == 2
+        batch_size = x.shape[0]
+        b = np.zeros([batch_size, nJ])
+        for k in C.keys():
+            c, power = C[k]
+            b[:, k] = c * np.prod(x**power, axis=1)
+        return b
+    
+    return calc_basis
