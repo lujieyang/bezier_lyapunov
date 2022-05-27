@@ -95,6 +95,7 @@ def cartpole_batch_setup():
     x2z = lambda x : np.array([x[0], np.sin(x[1]), np.cos(x[1]), x[2], x[3]])
 
     def T(z, dtype=float):
+        assert z.shape[1] == nz
         T = np.zeros([z.shape[0], nz, nx], dtype=dtype)
         T[:, 0, 0] = 1
         T[:, 1, 1] = z[:, 2]
@@ -105,6 +106,7 @@ def cartpole_batch_setup():
 
     def f1(x, T):
         assert x.shape[0] == T.shape[0]
+        assert x.shape[1] == nx
         s = np.sin(x[:, 1])
         c = np.cos(x[:, 1])
         qdot = x[:, nq:]
@@ -116,6 +118,7 @@ def cartpole_batch_setup():
     
     def f2(x, T, dtype=float):
         assert x.shape[0] == T.shape[0]
+        assert x.shape[1] == nx
         s = np.sin(x[:, 1])
         c = np.cos(x[:, 1])
         f2_val = np.zeros([x.shape[0], nx, nu], dtype=dtype)
@@ -124,8 +127,8 @@ def cartpole_batch_setup():
         return np.matmul(T, f2_val)
 
     # State limits (region of state space where we approximate the value function).
-    x_max = np.array([2, 2*np.pi, 3, 3])
-    x_min = np.array([-2, 0, -3, -3])
+    x_max = np.array([2, 2*np.pi, 6, 6])
+    x_min = np.array([-2, 0, -6, -6])
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([0, np.pi, 0, 0])
@@ -295,7 +298,7 @@ def convex_sampling_hjb_lower_bound_batch_calc(deg, params_dict, n_mesh=6, objec
         dphi_dx = np.expand_dims(calc_basis_dJdz(Z), axis=1)
         dPhi_dx = np.concatenate((dPhi_dx, dphi_dx), axis=1)
 
-    T_val = T(X)
+    T_val = T(Z)
     f2_val = f2(X, T_val)
     f2_dPhi_dx = np.matmul(np.transpose(f2_val, (0, 2, 1)), dPhi_dx)
     Q_batch = np.einsum("bki, ii, bik->bik", f2_dPhi_dx, Rinv, f2_dPhi_dx)
@@ -741,15 +744,14 @@ def plot_value_function(J_star, z, params_dict, poly_deg, file_name="", check_in
 
 
 if __name__ == '__main__':
-    poly_deg = 2
-    n_mesh = 6
+    poly_deg = 4
+    n_mesh = 21
     adversarial = False
     folder_name = "cartpole/data/batch"
     print("Deg: ", poly_deg)
-    print("Mesh needed: ", comb(poly_deg+5, 5)**0.25)
+    print("Mesh needed: {}, # of meshes: {}".format(comb(poly_deg+5, 5)**0.25, n_mesh))
     params_dict = cartpole_batch_setup()
     J_star, z, prog, J_expr = convex_sampling_hjb_lower_bound_batch_calc(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=True)
-    # J_star, z = lp_sampling_hjb_lower_bound(poly_deg, params_dict, n_mesh=n_mesh, objective="integrate_ring", visualize=True)
     if adversarial:
         J_star, z = adversarial_sample_convex_hjb_lower_bound(prog, J_star, z, J_expr, params_dict)
         folder_name += "/adversarial"
