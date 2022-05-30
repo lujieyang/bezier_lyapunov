@@ -1,4 +1,5 @@
 import numpy as np
+from sympy import is_convex
 from cubic_polynomial_fvi import optimal_cost_to_go, plot_value_function_sos
 from pydrake.solvers import mathematicalprogram as mp
 from pydrake.all import (MathematicalProgram, Solve, SolverOptions, Expression,
@@ -49,11 +50,11 @@ def sos_lower_bound(deg):
     assert result.is_success()
 
     # retrieve value function
-    J_opt = result.GetSolution(J.ToExpression())
+    J_opt = result.GetSolution(J).RemoveTermsWithSmallCoefficients(1e-6)
     cost = - result.get_optimal_cost()
     
-    plot_value_function_sos(J_opt, 0, [x], deg)
-    return J_opt, cost
+    # plot_value_function_sos(J_opt, 0, [x], deg)
+    return J_opt.ToExpression(), x
 
 def sos_lqr_upper_bound(deg):
     x0 = 0
@@ -96,7 +97,72 @@ def sos_lqr_upper_bound(deg):
     cost = - result.get_optimal_cost()
     
     plot_value_function_sos(J_opt, 0, [x], deg)
-    return J_opt, cost
+    return J_opt, K[0,0]
+
+def lqr_cost_to_go(K):
+    x = np.linspace(-1, 1, 200)
+    J = (1+K**2)*np.log(K+4*x**2-1)/8
+    J -= np.min(J)
+    return x, J
+
+def sos_fixed_control_upper_bound(deg, deg_lower, approx_lower_deg=-1):
+    x0 = 0
+    Q = 1
+    R = 1
+    A = np.ones(1)
+    B = np.ones(1)
+    K, S = LinearQuadraticRegulator(A, B, np.array([Q]), np.array([R]))
+    # State limits (region of state space where we approximate the value function).
+    X = [-1, 1]
+    f = lambda x, u : x - 4 * x ** 3 + u
+    l = lambda x, u : Q * x ** 2 + R * u ** 2
+    
+    J_lower, x = sos_lower_bound(deg_lower)
+    u_fixed = - J_lower.Differentiate(x)/2
+
+    if approx_lower_deg >=0:
+        prog1 = MathematicalProgram()
+        prog1.AddIndeterminates(np.array([x]))
+        u_approx = prog1.NewFreePolynomial(Variables([x]), approx_lower_deg)
+        diff = (Polynomial(u_fixed) - u_approx)**2
+        diff_int = diff.Integrate(x, -1, 1).ToExpression()
+        prog1.AddQuadraticCost(diff_int, is_convex=True)
+        result1 = Solve(prog1)
+        assert result1.is_success()
+        u_fixed = result1.GetSolution(u_approx.ToExpression())
+
+    prog = MathematicalProgram()
+    prog.AddIndeterminates(np.array([x]))
+    J = prog.NewFreePolynomial(Variables([x]), deg)
+
+    # Maximize volume beneath the value function.
+    J_int = J.Integrate(x, -1, 1).ToExpression()
+    prog.AddLinearCost(J_int)
+    
+    # S-procedure for the input limits.
+    lamx = prog.NewSosPolynomial(Variables([x]), deg)[0]
+    S_procedure = lamx * Polynomial((x - X[0]) * (X[1] - x))
+    
+    # Enforce Bellman inequality.
+    J_dot = J.Differentiate(x) * Polynomial(f(x, u_fixed))
+    prog.AddSosConstraint(- J_dot - Polynomial(l(x, u_fixed)) - S_procedure)
+
+    # J(0) = 0.
+    prog.AddLinearConstraint(J.EvaluatePartial({x: x0}).ToExpression() == 0)
+
+    # Solve and retrieve result.
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    assert result.is_success()
+
+    # retrieve value function
+    J_opt = result.GetSolution(J.ToExpression())
+    cost = - result.get_optimal_cost()
+    
+    plot_value_function_sos(J_opt, 0, [x], deg)
+    return J_opt
 
 def sos_sample_upper_bound(deg, num_controls=5):
     x0 = 0
@@ -179,7 +245,7 @@ def sos_regional_upper_bound(deg):
     
     # S-procedure for the input limits.
     xu = Variables([x, u])
-    J = Polynomial(3 * S[0,0] * x**2)
+    J = Polynomial(S[0,0] * x**2)
 
     def search_lambda(J):
         prog = MathematicalProgram()
@@ -193,7 +259,7 @@ def sos_regional_upper_bound(deg):
         
         # Enforce Bellman inequality.
         J_dot = J.Differentiate(x) * Polynomial(f(x, u))
-        prog.AddSosConstraint((1+lam0)*Polynomial(x**2)*region - lam1*(J_dot + Polynomial(l(x, u))) + S_procedure)
+        prog.AddSosConstraint((1+lam0)*Polynomial(x**2)*region - lam1*(J_dot + Polynomial(l(x, u))))
 
         options = SolverOptions()
         options.SetOption(CommonSolverOption.kPrintToConsole, 1)
@@ -229,12 +295,20 @@ def sos_regional_upper_bound(deg):
 
     return J_opt
 
-if __name__ == '__main__':
+def main_fixed_control():
     x_opt, J_opt = optimal_cost_to_go()
-    for poly_deg in range(16, 18, 2):
-        sos_regional_upper_bound(poly_deg)
+    lower_deg = 8
+    approx_lower_deg = -1
+    for poly_deg in range(lower_deg, 16, 2):
+        sos_fixed_control_upper_bound(poly_deg, lower_deg, approx_lower_deg)
+
     plt.plot(x_opt, J_opt.T, 'k', label='J*')
     plt.legend()
-    plt.savefig("J_sos_lower_bound.png") 
+    plt.title("u* deg {}, approx deg {}".format(lower_deg, approx_lower_deg))
+    plt.savefig("J_sos_deg_{}_approx_{}_control_upper_bound.png".format(lower_deg, approx_lower_deg)) 
+
+
+if __name__ == '__main__':
+    main_fixed_control()
 
     
