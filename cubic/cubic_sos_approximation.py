@@ -1,5 +1,4 @@
 import numpy as np
-from sympy import is_convex
 from cubic_polynomial_fvi import optimal_cost_to_go, plot_value_function_sos
 from pydrake.solvers import mathematicalprogram as mp
 from pydrake.all import (MathematicalProgram, Solve, SolverOptions, Expression,
@@ -164,6 +163,66 @@ def sos_fixed_control_upper_bound(deg, deg_lower, approx_lower_deg=-1):
     plot_value_function_sos(J_opt, 0, [x], deg)
     return J_opt
 
+def sos_iterative_upper_bound(deg):
+    x0 = 0
+    Q = 1
+    R = 1
+    A = np.ones(1)
+    B = np.ones(1)
+    K, S = LinearQuadraticRegulator(A, B, np.array([Q]), np.array([R]))
+    # State limits (region of state space where we approximate the value function).
+    X = [-1, 1]
+    f = lambda x, u : x - 4 * x ** 3 + u
+    l = lambda x, u : Q * x ** 2 + R * u ** 2
+    
+    def search_upper_bound(u_fixed):
+        prog = MathematicalProgram()
+        prog.AddIndeterminates(np.array([x]))
+        J = prog.NewFreePolynomial(Variables([x]), deg)
+
+        # Maximize volume beneath the value function.
+        J_int = J.Integrate(x, -1, 1).ToExpression()
+        prog.AddLinearCost(J_int)
+        
+        # S-procedure for the input limits.
+        lamx = prog.NewSosPolynomial(Variables([x]), deg)[0]
+        S_procedure = lamx * Polynomial((x - X[0]) * (X[1] - x))
+        
+        # Enforce Bellman inequality.
+        J_dot = J.Differentiate(x) * Polynomial(f(x, u_fixed))
+        prog.AddSosConstraint(- J_dot - Polynomial(l(x, u_fixed)) - S_procedure)
+
+        # J(0) = 0.
+        prog.AddLinearConstraint(J.EvaluatePartial({x: x0}).ToExpression() == 0)
+
+        # Solve and retrieve result.
+        options = SolverOptions()
+        options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+        prog.SetSolverOptions(options)
+        result = Solve(prog)
+        assert result.is_success()
+
+        # retrieve value function
+        J_opt = result.GetSolution(J.RemoveTermsWithSmallCoefficients(1e-6))
+        cost = - result.get_optimal_cost()
+        u_opt = - J_opt.Differentiate(x)/2
+
+        return J_opt, u_opt.ToExpression()
+
+    x = Variable("x")
+    u_fixed = - K[0,0] * x
+    old_J = Polynomial(x)
+    for i in range(50):
+        J_opt, u_fixed = search_upper_bound(u_fixed)
+        if J_opt.CoefficientsAlmostEqual(old_J, 1e-3):
+            print("="*10, "Converged!","="*20)
+            print("Iter. ", i)
+            break
+        if i% 5 == 0:
+            plot_value_function_sos(J_opt, 0, [x], label="iter. {}".format(i))
+        old_J = J_opt
+    return J_opt
+
 def sos_sample_upper_bound(deg, num_controls=5):
     x0 = 0
     Q = 1
@@ -309,6 +368,13 @@ def main_fixed_control():
 
 
 if __name__ == '__main__':
-    main_fixed_control()
+    deg = 10
+    sos_iterative_upper_bound(deg)
+
+    x_opt, J_opt = optimal_cost_to_go()
+    plt.plot(x_opt, J_opt.T, 'k', label='J*')
+    plt.legend()
+    plt.title("Iterative fixed control upper bound deg {}".format(deg))
+    plt.savefig("J_sos_deg_{}_iterative_upper_bound.png".format(deg)) 
 
     
