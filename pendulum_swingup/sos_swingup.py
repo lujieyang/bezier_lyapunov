@@ -1,14 +1,14 @@
 import numpy as np
-from matplotlib import cm
+from scipy.integrate import quad
 import matplotlib.pyplot as plt
 from pydrake.examples.pendulum import (PendulumParams)
-from pydrake.all import (MathematicalProgram, Variables, Solve, Polynomial)
+from pydrake.all import (MathematicalProgram, Variables, Solve, Polynomial, SolverOptions, CommonSolverOption)
 from polynomial_integration_fvi import plot_value_function_sos
 
 # Given the degree for the approximate value function and the polynomials
 # in the S procedure, solves the SOS and returns the approximate value function
 # (together with the objective of the SOS program).
-def pendulum_sos_dp(deg):
+def pendulum_sos_dp(deg, objective="integrate_ring", visualize=False):
     # System dimensions. Here:
     # x = [theta, theta_dot]
     # z = [sin(theta), cos(theta), theta_dot]
@@ -42,7 +42,7 @@ def pendulum_sos_dp(deg):
     z0 = x2z(x0)
         
     # Quadratic running cost in augmented state.
-    Q = np.diag([1, 1, 1]) * 50
+    Q = np.diag([1, 1, 1]) * 10
     R = np.diag([1])
     def l(z, u):
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
@@ -55,29 +55,47 @@ def pendulum_sos_dp(deg):
     J_expr = J.ToExpression()
 
     # Maximize volume beneath the value function.
-    obj = J
-    for i in range(nz):
-        obj = obj.Integrate(z[i], z_min[i], z_max[i])
-    prog.AddLinearCost(- obj.ToExpression())
+    if objective=="integrate_all":
+        obj = J
+        for i in range(nz):
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        prog.AddCost(-obj.ToExpression())
+    elif objective=="integrate_ring":
+        obj = J.Integrate(z[-1], z_min[-1], z_max[-1])
+        c_r = 1
+        cost = 0
+        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+            s_deg = monomial.degree(z[0]) 
+            c_deg = monomial.degree(z[1])
+            monomial_int = quad(lambda x: np.sin(x)**s_deg * np.cos(x)**c_deg, 0, 2*np.pi)[0]
+            if np.abs(monomial_int) <=1e-5:
+                monomial_int = 0
+            cost += monomial_int * coeff
+        prog.AddLinearCost(-c_r * cost)
 
     # S procedure for s^2 + c^2 = 1.
     lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
     S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
-    lam_1 = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
-    S_procedure_1 = lam_1 * (z[0]**2 + z[1]**2 - 1)
+    lam_1 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
+    lam_2 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_2 = lam_2 * (z[2]**2 - 4*np.pi**2)
 
     # Enforce Bellman inequality.
     J_dot = J_expr.Jacobian(z).dot(f(z, u))
-    prog.AddSosConstraint(J_dot + l(z, u) + S_procedure)
+    prog.AddSosConstraint(J_dot + l(z, u) + S_procedure + S_procedure_1)
 
     # Enforce that value function is PD
-    prog.AddSosConstraint(J_expr + S_procedure_1)
+    prog.AddSosConstraint(J_expr + S_procedure_2)
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
     prog.AddLinearConstraint(J0 == 0)
 
     # Solve and retrieve result.
+    prog.AddLinearConstraint(J0 == 0)
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
     result = Solve(prog)
     assert result.is_success()
     J_star = Polynomial(result.GetSolution(J_expr))
@@ -88,7 +106,8 @@ def pendulum_sos_dp(deg):
     dJdz = J_star.ToExpression().Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
 
-    plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, directory="sos")
+    if visualize:
+        plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_{}".format(objective))
     return J_star, u_star, z
 
 
@@ -194,4 +213,4 @@ def pendulum_sos_control_affine_dp(deg):
 
 
 if __name__ == '__main__':
-    J_star, u_star, z = pendulum_sos_dp(deg=10)
+    J_star, u_star, z = pendulum_sos_dp(2, "integrate_ring", visualize=True)
