@@ -1,14 +1,14 @@
 import numpy as np
 from scipy.integrate import quad
 import matplotlib.pyplot as plt
-from pydrake.examples.pendulum import (PendulumParams)
-from pydrake.all import (MathematicalProgram, Variables, Solve, Polynomial, SolverOptions, CommonSolverOption)
+from pydrake.examples.pendulum import (PendulumParams, PendulumPlant, PendulumInput)
+from pydrake.all import (MathematicalProgram, Variables, Solve, Polynomial, SolverOptions, CommonSolverOption, Linearize, LinearQuadraticRegulator)
 from polynomial_integration_fvi import plot_value_function_sos
 
 # Given the degree for the approximate value function and the polynomials
 # in the S procedure, solves the SOS and returns the approximate value function
 # (together with the objective of the SOS program).
-def pendulum_sos_dp(deg, objective="integrate_ring", visualize=False):
+def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False):
     # System dimensions. Here:
     # x = [theta, theta_dot]
     # z = [sin(theta), cos(theta), theta_dot]
@@ -83,22 +83,28 @@ def pendulum_sos_dp(deg, objective="integrate_ring", visualize=False):
 
     # Enforce Bellman inequality.
     J_dot = J_expr.Jacobian(z).dot(f(z, u))
-    prog.AddSosConstraint(J_dot + l(z, u) + S_procedure + S_procedure_1)
+    if deg <= 4:
+        prog.AddSosConstraint(J_dot + l(z, u) + S_procedure + S_procedure_1)
+    else:
+        prog.AddSosConstraint(J_dot + l(z, u) + S_procedure)
 
     # Enforce that value function is PD
-    prog.AddSosConstraint(J_expr + S_procedure_2)
+    if deg <= 4:
+        prog.AddSosConstraint(J_expr + S_procedure_2)
+    else:
+        prog.AddSosConstraint(J_expr)
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
     prog.AddLinearConstraint(J0 == 0)
 
     # Solve and retrieve result.
-    prog.AddLinearConstraint(J0 == 0)
-    options = SolverOptions()
-    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    # options = SolverOptions()
+    # options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    # prog.SetSolverOptions(options)
     result = Solve(prog)
     assert result.is_success()
-    J_star = Polynomial(result.GetSolution(J_expr))
+    J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
     # Solve for the optimal feedback in augmented coordinates.
     Rinv = np.linalg.inv(R)
@@ -110,6 +116,302 @@ def pendulum_sos_dp(deg, objective="integrate_ring", visualize=False):
         plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_{}".format(objective))
     return J_star, u_star, z
 
+def pendulum_lqr(z0):
+    # Polynomial system not stabilizable: LQR cannot see the constraint s^2 + c^2 = 1
+    params = PendulumParams()
+    g = params.gravity()
+    m = params.mass()
+    l = params.length()
+    b = params.damping()
+
+    A = np.array([[0, z0[2], z0[1]],
+                  [-z0[2], 0, -z0[0]],
+                  [g/l, 0, -b/(m*l**2)]])
+    B = np.array([[0], [0], [1/(m*l**2)]])
+    Q = np.diag((10.,10., 10.))
+    R = [1]
+    K = LinearQuadraticRegulator(A, B, Q, R)[0]
+    return np.squeeze(K)
+
+def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visualize=False):
+    # System dimensions. Here:
+    # x = [theta, theta_dot]
+    # z = [sin(theta), cos(theta), theta_dot]
+    nx = 2
+    nz = 3
+    nu = 1
+
+    # Map from original state to augmented state.
+    # Uses sympy to be able to do symbolic integration later on.
+    x2z = lambda x : np.array([np.sin(x[0]), np.cos(x[0]), x[1]])
+
+    # System dynamics in augmented state (z).
+    params = PendulumParams()
+    inertia = params.mass() * params.length() ** 2
+    tau_g = params.mass() * params.gravity() * params.length()
+    def f(z, u):
+        return [
+            z[1] * z[2],
+            - z[0] * z[2],
+            (tau_g * z[0] + u[0] - params.damping() * z[2]) / inertia
+        ]
+
+    # State limits (region of state space where we approximate the value function).
+    x_max = np.array([np.pi, 2*np.pi])
+    x_min = - x_max
+    z_max = x2z(x_max)
+    z_min = x2z(x_min)
+
+    # Equilibrium point in both the system coordinates.
+    x0 = np.array([0, 0])
+    z0 = x2z(x0)
+        
+    # Quadratic running cost in augmented state.
+    Q = np.diag([1, 1, 1]) * 10
+    R = np.diag([1])
+    def l(z, u):
+        return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
+
+    # Fixed control law from lower bound
+    J_lower, u_fixed, z = pendulum_sos_lower_bound(deg_lower)
+
+    # Check if u_fixed is stabilizing
+    dJdz = J_lower.ToExpression().Jacobian(z)
+    xdot = f(z, u_fixed)
+    Jdot = dJdz.dot(xdot)
+    prog0 = MathematicalProgram()
+    prog0.AddIndeterminates(z)
+    lam = prog0.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
+    lam_1 = prog0.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
+    prog0.AddSosConstraint(-Jdot + S_procedure + S_procedure_1)
+    result0 = Solve(prog0)
+    assert result0.is_success()
+
+    # Set up optimization.        
+    prog = MathematicalProgram()
+    prog.AddIndeterminates(z)
+    J = prog.NewFreePolynomial(Variables(z), deg)
+    J_expr = J.ToExpression()
+
+    a = prog.NewSosPolynomial(Variables(z), deg)[0]
+
+    # Maximize volume beneath the value function.
+    if objective=="integrate_all":
+        obj = J
+        for i in range(nz):
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        prog.AddCost(-obj.ToExpression())
+    elif objective=="integrate_ring":
+        obj = J.Integrate(z[-1], z_min[-1], z_max[-1]) + 1e3 * a.Integrate(z[-1], z_min[-1], z_max[-1])
+        c_r = 1
+        cost = 0
+        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+            s_deg = monomial.degree(z[0]) 
+            c_deg = monomial.degree(z[1])
+            monomial_int = quad(lambda x: np.sin(x)**s_deg * np.cos(x)**c_deg, 0, 2*np.pi)[0]
+            if np.abs(monomial_int) <=1e-5:
+                monomial_int = 0
+            cost += monomial_int * coeff
+        prog.AddLinearCost(c_r * cost)
+
+    # S procedure for s^2 + c^2 = 1.
+    lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
+    lam_1 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
+    lam_2 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_2 = lam_2 * (z[2]**2 - 4*np.pi**2)
+
+    # Enforce Bellman inequality.
+    J_dot = J_expr.Jacobian(z).dot(f(z, u_fixed))
+    prog.AddSosConstraint(a.ToExpression() - J_dot - l(z, u_fixed) + S_procedure + S_procedure_1)
+
+    # Enforce that value function is PD
+    prog.AddSosConstraint(J_expr + S_procedure_2)
+
+    # Enforce l(x,u)-a(x) is PD
+    u = prog.NewIndeterminates(nu, 'u')
+    lam_3 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_3 = lam_3 * (z[2]**2 - 4*np.pi**2)
+    prog.AddSosConstraint(l(z,u) - a.ToExpression() + S_procedure_3)
+
+    # J(z0) = 0.
+    J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
+    prog.AddLinearConstraint(J0 == 0)
+
+    # Solve and retrieve result.
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    assert result.is_success()
+    J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
+    a_star = result.GetSolution(a).RemoveTermsWithSmallCoefficients(1e-6)
+    l_val = Polynomial(result.GetSolution(l(z, u_fixed)))
+
+    # Solve for the optimal feedback in augmented coordinates.
+    Rinv = np.linalg.inv(R)
+    f2 = np.array([[0], [0], [1 / inertia]])
+    dJdz = J_star.ToExpression().Jacobian(z)
+    u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
+
+    if visualize:
+        plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_upper_bound_{}".format(objective))
+    return J_star, u_star, z
+
+def pendulum_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring", visualize=False):
+    # System dimensions. Here:
+    # x = [theta, theta_dot]
+    # z = [sin(theta), cos(theta), theta_dot]
+    nx = 2
+    nz = 3
+    nu = 1
+
+    # Map from original state to augmented state.
+    # Uses sympy to be able to do symbolic integration later on.
+    x2z = lambda x : np.array([np.sin(x[0]), np.cos(x[0]), x[1]])
+
+    # System dynamics in augmented state (z).
+    params = PendulumParams()
+    inertia = params.mass() * params.length() ** 2
+    tau_g = params.mass() * params.gravity() * params.length()
+    def f(z, u):
+        return [
+            z[1] * z[2],
+            - z[0] * z[2],
+            (tau_g * z[0] + u[0] - params.damping() * z[2]) / inertia
+        ]
+
+    # State limits (region of state space where we approximate the value function).
+    x_max = np.array([np.pi, 2*np.pi])
+    x_min = - x_max
+    z_max = x2z(x_max)
+    z_min = x2z(x_min)
+
+    # Equilibrium point in both the system coordinates.
+    x0 = np.array([0, 0])
+    z0 = x2z(x0)
+        
+    # Quadratic running cost in augmented state.
+    Q = np.diag([1, 1, 1]) * 10
+    R = np.diag([1])
+    def l(z, u):
+        return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
+
+    # Fixed control law from lower bound
+    J_lower, u_fixed, z = pendulum_sos_lower_bound(deg_lower)
+
+    # Check if u_fixed is stabilizing
+    dJdz = J_lower.ToExpression().Jacobian(z)
+    xdot = f(z, u_fixed)
+    Jdot = dJdz.dot(xdot)
+    prog0 = MathematicalProgram()
+    prog0.AddIndeterminates(z)
+    lam = prog0.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
+    lam_1 = prog0.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
+    prog0.AddSosConstraint(-Jdot + S_procedure + S_procedure_1)
+    result0 = Solve(prog0)
+    assert result0.is_success()
+
+    # Set up optimization.        
+    prog = MathematicalProgram()
+    prog.AddIndeterminates(z)
+    J = prog.NewFreePolynomial(Variables(z), deg)
+    J_expr = J.ToExpression()
+
+    a = prog.NewSosPolynomial(Variables(z), deg)[0]
+
+    # Minimize volume beneath the a(x).
+    obj = a.Integrate(z[-1], z_min[-1], z_max[-1])
+    c_r = 1
+    cost = 0
+    for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+        s_deg = monomial.degree(z[0]) 
+        c_deg = monomial.degree(z[1])
+        monomial_int = quad(lambda x: np.sin(x)**s_deg * np.cos(x)**c_deg, 0, 2*np.pi)[0]
+        if np.abs(monomial_int) <=1e-5:
+            monomial_int = 0
+        cost += monomial_int * coeff
+    a_cost = prog.AddLinearCost(c_r * cost)
+
+    # S procedure for s^2 + c^2 = 1.
+    lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
+    lam_1 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
+    lam_2 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_2 = lam_2 * (z[2]**2 - 4*np.pi**2)
+
+    # Enforce Bellman inequality.
+    J_dot = J_expr.Jacobian(z).dot(f(z, u_fixed))
+    prog.AddSosConstraint(a.ToExpression() - J_dot - l(z, u_fixed) + S_procedure + S_procedure_1)
+
+    # Enforce that value function is PD
+    prog.AddSosConstraint(J_expr + S_procedure_2)
+
+    # Enforce l(x,u)-a(x) is PD
+    u = prog.NewIndeterminates(nu, 'u')
+    lam_3 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_3 = lam_3 * (z[2]**2 - 4*np.pi**2)
+    prog.AddSosConstraint(l(z,u) - a.ToExpression() + S_procedure_3)
+
+    # J(z0) = 0.
+    J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
+    prog.AddLinearConstraint(J0 == 0)
+
+    result = Solve(prog)
+    assert result.is_success()
+    a_star = result.GetSolution(a).RemoveTermsWithSmallCoefficients(1e-6).ToExpression()
+
+    prog.RemoveCost(a_cost)
+
+    # Maximize volume beneath the value function.
+    if objective=="integrate_all":
+        obj = J
+        for i in range(nz):
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        prog.AddCost(-obj.ToExpression())
+    elif objective=="integrate_ring":
+        obj = J.Integrate(z[-1], z_min[-1], z_max[-1])
+        c_r = 1
+        cost = 0
+        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+            s_deg = monomial.degree(z[0]) 
+            c_deg = monomial.degree(z[1])
+            monomial_int = quad(lambda x: np.sin(x)**s_deg * np.cos(x)**c_deg, 0, 2*np.pi)[0]
+            if np.abs(monomial_int) <=1e-5:
+                monomial_int = 0
+            cost += monomial_int * coeff
+        prog.AddLinearCost(c_r * cost)
+
+    # Enforce Bellman inequality.
+    prog.AddSosConstraint(a_star - J_dot - l(z, u_fixed) + S_procedure + S_procedure_1)
+
+    # J(z0) = 0.
+    J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
+    prog.AddLinearConstraint(J0 == 0)
+
+    # Solve and retrieve result.
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    assert result.is_success()
+    J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
+
+    # Solve for the optimal feedback in augmented coordinates.
+    Rinv = np.linalg.inv(R)
+    f2 = np.array([[0], [0], [1 / inertia]])
+    dJdz = J_star.ToExpression().Jacobian(z)
+    u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
+
+    if visualize:
+        plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_upper_bound_relaxed_{}".format(objective))
+    return J_star, u_star, z
 
 def pendulum_sos_control_affine_dp(deg):
     # System dimensions. Here:
@@ -213,4 +515,4 @@ def pendulum_sos_control_affine_dp(deg):
 
 
 if __name__ == '__main__':
-    J_star, u_star, z = pendulum_sos_dp(2, "integrate_ring", visualize=True)
+    J_star, u_star, z = pendulum_sos_upper_bound_relaxed(2, 2, "integrate_ring", visualize=True)
