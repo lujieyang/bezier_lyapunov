@@ -1,10 +1,9 @@
 import numpy as np
 from scipy.integrate import quad
-from utils import extract_polynomial_coeff_dict
+from utils import extract_polynomial_coeff_dict, reconstruct_polynomial_from_dict
 import pickle
 from pydrake.all import (MathematicalProgram, Variables, Expression, Solve, Polynomial, SolverOptions, CommonSolverOption, 
-Linearize, LinearQuadraticRegulator, CsdpSolver, DiagramBuilder, AddMultibodyPlantSceneGraph,
-Parser)
+Linearize, LinearQuadraticRegulator, DiagramBuilder, AddMultibodyPlantSceneGraph, Parser)
 
 from underactuated import FindResource
 from cartpole_swingup_fvi import plot_value_function, cartpole_setup
@@ -61,7 +60,7 @@ def cartpole_sos_lower_bound(deg, objective="integrate_ring", visualize=False):
         return T@f2_val
     
     # State limits (region of state space where we approximate the value function).
-    z_max = np.array([3, 1, 1, 6, 6])
+    z_max = np.array([2, 1, 1, 5, 5])
     z_min = -z_max
 
     # Equilibrium point in both the system coordinates.
@@ -70,7 +69,7 @@ def cartpole_sos_lower_bound(deg, objective="integrate_ring", visualize=False):
     z0[np.abs(z0)<=1e-6] = 0
         
     # Quadratic running cost in augmented state.
-    Q = np.diag([10, 10, 10, 1, 1])
+    Q = np.diag([100, 1000, 1000, 500, 500])
     R = np.diag([1]) 
     def l_cost(z, u):
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
@@ -103,7 +102,12 @@ def cartpole_sos_lower_bound(deg, objective="integrate_ring", visualize=False):
             if np.abs(monomial_int1) <=1e-5:
                 monomial_int1 = 0
             cost += monomial_int1 * coeff
-        prog.AddLinearCost(-c_r * cost)
+        poly = Polynomial(cost)
+        cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
+        # Make the numerics better
+        prog.AddLinearCost(-c_r * cost/np.max(np.abs(cost_coeff)))
+        # prog.AddLinearCost(-c_r * cost)
+    # prog.AddQuadraticCost(np.sum(np.array(list(J.decision_variables()))**2), is_convex=True)
 
     # S procedure for s^2 + c^2 = 1.
     lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
@@ -147,8 +151,7 @@ def cartpole_sos_lower_bound(deg, objective="integrate_ring", visualize=False):
     options = SolverOptions()
     options.SetOption(CommonSolverOption.kPrintToConsole, 1)
     prog.SetSolverOptions(options)
-    solver = CsdpSolver()
-    result = solver.Solve(prog)
+    result = Solve(prog)
     assert result.is_success()
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
@@ -161,6 +164,8 @@ def cartpole_sos_lower_bound(deg, objective="integrate_ring", visualize=False):
 
     if visualize:
         params_dict = cartpole_setup()
+        params_dict["x_max"] = np.array([2, 2*np.pi, 5, 5])
+        params_dict["x_min"] = np.array([-2, 0 *np.pi, -5, -5])
         plot_value_function(J_star, z, params_dict, deg, file_name="sos/lower_bound_{}".format(objective))
     return J_star, u_star, z
 
@@ -190,7 +195,7 @@ def cartpole_lqr():
     K, S = LinearQuadraticRegulator(A, B, Q, R)
     return np.squeeze(K)
 
-def cartpole_sos_upper_bound_relaxed(deg, deg_lower=0, objective="integrate_ring", visualize=False):
+def cartpole_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring", visualize=False):
     nz = 5
     nq = 2
     nx = 2 * nq
@@ -237,10 +242,10 @@ def cartpole_sos_upper_bound_relaxed(deg, deg_lower=0, objective="integrate_ring
         f2_val[2, :] = 1/(mc+mp*s**2)
         f2_val[3, :] =-c/(mc+mp*s**2)/l
         return T@f2_val
-    
+
     # State limits (region of state space where we approximate the value function).
-    z_max = np.array([2, np.sin(0.8), np.cos(np.pi-0.8), 4, 4])
-    z_min = np.array([-2, -np.sin(0.8), -1, -4, 4])
+    z_max = np.array([2, 1, 1, 5, 5])
+    z_min = -z_max
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([0, np.pi, 0, 0])
@@ -256,17 +261,40 @@ def cartpole_sos_upper_bound_relaxed(deg, deg_lower=0, objective="integrate_ring
     Rinv = np.linalg.inv(R)
 
     # Fixed control law from lower bound
-    
-
     # Set up optimization.        
     prog = MathematicalProgram()
-    # prog.AddIndeterminates(z)
     z = prog.NewIndeterminates(nz, 'z')
-    Kx = cartpole_lqr()
-    K = np.zeros(nz)
-    K[:2] = Kx[:2]
-    K[-2:] = Kx[-2:]
-    u_fixed = np.array([-K@z])
+    with open("cartpole/data/sos/J_lower_bound_deg_{}.pkl".format(deg_lower), "rb") as input_file:
+        C = pickle.load(input_file)
+    J_lower = reconstruct_polynomial_from_dict(C, z)
+    Rinv = np.linalg.inv(R)
+    T_val = T(z)
+    f2_val = f2(z, T_val)
+    dJdz = J_lower.Jacobian(z)
+    u_fixed = - .5 * Rinv.dot(f2_val.T).dot(dJdz.T)
+
+    # Check if u_fixed is stabilizing
+    zdot, denominator = f(z, u_fixed, T_val)
+    Jdot = dJdz.dot(zdot)
+    prog0 = MathematicalProgram()
+    prog0.AddIndeterminates(z)
+    lam = prog0.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_procedure = lam * (z[1]**2 + z[2]**2 - 1)
+    # S procedure for compact domain 
+    lam_Jdot_0 = prog0.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_Jdot = lam_Jdot_0 * (z[0]-z_max[0]) * (z[0]-z_min[0])
+    lam_Jdot_3 = prog0.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_Jdot += lam_Jdot_3 * (z[3]-z_max[3]) * (z[3]-z_min[3])
+    lam_Jdot_4 = prog0.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_Jdot += lam_Jdot_4 * (z[4]-z_max[4]) * (z[4]-z_min[4])
+    prog0.AddSosConstraint(-Jdot*denominator + S_procedure + S_Jdot)
+    result0 = Solve(prog0)
+    assert result0.is_success()
+    # Kx = cartpole_lqr()
+    # K = np.zeros(nz)
+    # K[:2] = Kx[:2]
+    # K[-2:] = Kx[-2:]
+    # u_fixed = np.array([-K@z])
     J = prog.NewFreePolynomial(Variables(z), deg)
     J_expr = J.ToExpression()
 
@@ -378,16 +406,17 @@ def cartpole_sos_upper_bound_relaxed(deg, deg_lower=0, objective="integrate_ring
 
     if visualize:
         params_dict = cartpole_setup()
-        params_dict["x_max"] = np.array([2, np.pi+0.8, 4, 4])
-        params_dict["x_min"] = np.array([-2, np.pi-0.8, -4, -4])
+        params_dict["x_max"] = np.array([2, 2*np.pi, 5, 5])
+        params_dict["x_min"] = np.array([-2, 0, -5, -5])
         plot_value_function(J_star, z, params_dict, deg, file_name="sos/upper_bound_{}".format(objective))
     return J_star, u_star, z
 
 if __name__ == '__main__':
-    deg = 8
-    J_star, u_star, z = cartpole_sos_upper_bound_relaxed(deg, visualize=True)
+    deg = 6
+    # J_star, u_star, z = cartpole_sos_lower_bound(deg, visualize=True)
+    J_star, u_star, z = cartpole_sos_upper_bound_relaxed(deg, 6, visualize=True)
 
     C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("cartpole/data/sos/J_upper_bound_deg_{}.pkl".format(deg),"wb")
+    f = open("cartpole/data/sos/J_lower_bound_deg_{}.pkl".format(deg),"wb")
     pickle.dump(C, f)
     f.close()
