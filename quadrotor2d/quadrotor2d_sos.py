@@ -1,3 +1,6 @@
+import sys
+sys.path.append("../underactuated")
+
 import numpy as np
 from scipy.integrate import quad
 from utils import extract_polynomial_coeff_dict, calc_u_opt 
@@ -22,6 +25,7 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
     g = quadrotor.gravity
     r = quadrotor.length
     I = quadrotor.inertia
+    u0 = m * g / 2. * np.array([1, 1])
     # Map from original state to augmented state.
     # Uses sympy to be able to do symbolic integration later on.
     # x = (x, y, theta, xdot, ydot, thetadot)
@@ -54,8 +58,8 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
         return f2_val
     
     # State limits (region of state space where we approximate the value function).
-    z_max = np.array([0.75, 0.75, 1, 1, 4, 4, 2.75])
-    z_min = np.array([-0.75, -0.75, -1, 0, -4, -4, -2.75])
+    z_max = np.array([1, 1, 1, 1, 4.5, 4.5, 3])
+    z_min = np.array([-1, -1, -1, -1, -4.5, -4.5, -3])
 
     # Equilibrium point in both the system coordinates.
     x0 = np.zeros(nx)
@@ -66,12 +70,12 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
     Q = np.diag([10, 10, 10, 10, 1, 1, r/(2*np.pi)]) * 1e2
     R = np.array([[0.1, 0.05], [0.05, 0.1]])
     def l_cost(z, u):
-        return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
+        return (z - z0).dot(Q).dot(z - z0) + (u - u0).dot(R).dot(u - u0)
 
     Rinv = np.linalg.inv(R)
 
     if test:
-        return f, f2, x2z, Rinv
+        return nz, f, f2, x2z, Rinv
 
     xytheta_idx = [0, 1, 4, 5, 6]
 
@@ -95,8 +99,8 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
         c_r = 1
         cost = 0
         for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
-            s1_deg = monomial.degree(z[1]) 
-            c1_deg = monomial.degree(z[2])
+            s1_deg = monomial.degree(z[2]) 
+            c1_deg = monomial.degree(z[3])
             monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, 0, 2*np.pi)[0]
             if np.abs(monomial_int1) <=1e-5:
                 monomial_int1 = 0
@@ -106,7 +110,7 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
         # Make the numerics better
         prog.AddLinearCost(-c_r * cost/np.max(np.abs(cost_coeff)))
         # prog.AddLinearCost(-c_r * cost)
-    prog.AddQuadraticCost(1e-3*np.sum(np.array(list(J.decision_variables()))**2), is_convex=True)
+    # prog.AddQuadraticCost(1e-3*np.sum(np.array(list(J.decision_variables()))**2), is_convex=True)
 
     # S procedure for s^2 + c^2 = 1.
     lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
@@ -147,22 +151,33 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
     if visualize:
-        plot_value_function(J_star, z, file_name="lower_bound_{}_{}".format(objective, deg))
+        plot_value_function(J_star, z, z_max, u0, file_name="lower_bound_{}_{}".format(objective, deg), plot_states="xtheta", u_index=0)
     return J_star, z
 
-def plot_value_function(J_star, z, file_name=""):
+def plot_value_function(J_star, z, z_max, u0, file_name="", plot_states="xy", u_index=0):
     nz = 7
-    x_max = np.array([0.75, 0.75, np.pi/2, 4, 4, 2.75])
+    x_max = np.zeros(6)
+    x_max[:2] = z_max[:2]
+    x_max[2] = np.pi/2
+    x_max[3:] = z_max[4:]
     x_min = -x_max
 
     dJdz = J_star.ToExpression().Jacobian(z)
 
-    f, f2, x2z, Rinv = quadrotor2d_sos_lower_bound(2, test=True)
+    nz, f, f2, x2z, Rinv = quadrotor2d_sos_lower_bound(2, test=True)
 
-    X1, THETA = np.meshgrid(np.linspace(x_min[0], x_max[0], 51),
-                    np.linspace(x_min[2], x_max[2], 51))
     zero_vector = np.zeros(51*51)
-    X = np.vstack((X1.flatten(), zero_vector, THETA.flatten(), zero_vector, zero_vector, zero_vector))
+    if plot_states == "xtheta":
+        X1, THETA = np.meshgrid(np.linspace(x_min[0], x_max[0], 51),
+                        np.linspace(x_min[2], x_max[2], 51))
+        X = np.vstack((X1.flatten(), zero_vector, THETA.flatten(), zero_vector, zero_vector, zero_vector))
+        ylabel="theta"
+    elif plot_states == "xy":
+        X1, Y = np.meshgrid(np.linspace(x_min[0], x_max[0], 51),
+                        np.linspace(x_min[1], x_max[1], 51))
+        X = np.vstack((X1.flatten(), Y.flatten(), zero_vector, zero_vector, zero_vector, zero_vector))
+        ylabel="y"
+
     Z = x2z(X)
     J = np.zeros(Z.shape[1])
     U = np.zeros(Z.shape[1])
@@ -173,35 +188,35 @@ def plot_value_function(J_star, z, file_name=""):
         dJdz_val = np.zeros(nz, dtype=Expression)
         for n in range(nz): 
             dJdz_val[n] = dJdz[n].Evaluate(dict(zip(z, z_val)))
-        U[i] = calc_u_opt(dJdz_val, f2_val, Rinv)[0]
+        U[i] = calc_u_opt(dJdz_val, f2_val, Rinv)[u_index] + u0[u_index]
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
     ax.set_xlabel("x")
-    ax.set_ylabel("theta")
+    ax.set_ylabel(ylabel)
     ax.set_title("Cost-to-Go")
     im = ax.imshow(J.reshape(X1.shape),
             cmap=cm.jet, aspect='auto',
             extent=(x_min[0], x_max[0], x_max[2], x_min[2]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("quadrotor2d/figures/{}.png".format(file_name))
+    plt.savefig("quadrotor2d/figures/{}_{}.png".format(file_name, plot_states))
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
     ax.set_xlabel("x")
-    ax.set_ylabel("theta")
+    ax.set_ylabel(ylabel)
     ax.set_title("Policy")
     im = ax.imshow(U.reshape(X1.shape),
             cmap=cm.jet, aspect='auto',
             extent=(x_min[0], x_max[0], x_max[2], x_min[2]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("quadrotor2d/figures/{}_policy.png".format(file_name))
+    plt.savefig("quadrotor2d/figures/{}_policy_{}_u{}.png".format(file_name, plot_states, u_index+1))
 
 
 if __name__ == '__main__':
-    deg = 6
+    deg = 2
     J_star, z = quadrotor2d_sos_lower_bound(deg, visualize=True)
 
     C = extract_polynomial_coeff_dict(J_star, z)

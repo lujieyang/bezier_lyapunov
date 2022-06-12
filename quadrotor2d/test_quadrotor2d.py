@@ -6,7 +6,7 @@ from underactuated.quadrotor2d import Quadrotor2D
 
 class TestAcrobot(unittest.TestCase):
     def test_xdot(self):
-        f, f2, x2z, Rinv = quadrotor2d_sos_lower_bound(2, test=True)
+        nz, f, f2, x2z, Rinv = quadrotor2d_sos_lower_bound(2, test=True)
         z = x2z(x)
 
         f_drake_val = f_drake.CopyToVector()
