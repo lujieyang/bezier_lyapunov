@@ -53,8 +53,8 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
         c = z[3]
         f2_val = np.zeros([nz, nu], dtype=dtype)
         f2_val[4,:] = -s/m*np.ones(nu)
-        f2_val[5:] = c/m*np.ones(nu)
-        f2_val[6:] = r/I*np.array([1, -1])
+        f2_val[5,:] = c/m*np.ones(nu)
+        f2_val[6,:] = r/I*np.array([1, -1])
         return f2_val
     
     # State limits (region of state space where we approximate the value function).
@@ -70,7 +70,7 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
     Q = np.diag([10, 10, 10, 10, 1, 1, r/(2*np.pi)]) * 1e2
     R = np.array([[0.1, 0.05], [0.05, 0.1]])
     def l_cost(z, u):
-        return (z - z0).dot(Q).dot(z - z0) + (u - u0).dot(R).dot(u - u0)
+        return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
 
     Rinv = np.linalg.inv(R)
 
@@ -101,7 +101,7 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
         for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
             s1_deg = monomial.degree(z[2]) 
             c1_deg = monomial.degree(z[3])
-            monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, 0, 2*np.pi)[0]
+            monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, -np.pi, np.pi)[0]
             if np.abs(monomial_int1) <=1e-5:
                 monomial_int1 = 0
             cost += monomial_int1 * coeff
@@ -151,7 +151,7 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
     if visualize:
-        plot_value_function(J_star, z, z_max, u0, file_name="lower_bound_{}_{}".format(objective, deg), plot_states="xtheta", u_index=0)
+        plot_value_function(J_star, z, z_max, u0, file_name="lower_bound_{}_{}".format(objective, deg), plot_states="xy", u_index=0)
     return J_star, z
 
 def plot_value_function(J_star, z, z_max, u0, file_name="", plot_states="xy", u_index=0):
@@ -185,7 +185,7 @@ def plot_value_function(J_star, z, z_max, u0, file_name="", plot_states="xy", u_
         z_val = Z[:, i]
         J[i] = J_star.Evaluate(dict(zip(z, z_val)))
         f2_val = f2(z_val, dtype=float)
-        dJdz_val = np.zeros(nz, dtype=Expression)
+        dJdz_val = np.zeros(nz)
         for n in range(nz): 
             dJdz_val[n] = dJdz[n].Evaluate(dict(zip(z, z_val)))
         U[i] = calc_u_opt(dJdz_val, f2_val, Rinv)[u_index] + u0[u_index]
