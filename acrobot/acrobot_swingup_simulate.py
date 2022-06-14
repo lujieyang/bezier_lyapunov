@@ -9,8 +9,8 @@ from utils import calc_u_opt, reconstruct_polynomial_from_dict
 from acrobot_swingup_fvi import acrobot_setup
 from pydrake.examples.acrobot import (AcrobotPlant, AcrobotGeometry)
 from pydrake.all import (DiagramBuilder, Simulator, WrapToSystem, LeafSystem,
-                         BasicVector, MathematicalProgram, SceneGraph, MeshcatVisualizerCpp,
-                         Expression, ConnectMeshcatVisualizer)
+                         BasicVector, MathematicalProgram, SceneGraph)
+from pydrake.systems.meshcat_visualizer import (ConnectMeshcatVisualizer)
 from meshcat.servers.zmqserver import start_zmq_server_as_subprocess
 import meshcat
 
@@ -49,7 +49,6 @@ class Controller(LeafSystem):
             dJdz_val[n] = self.dJdz[n].Evaluate(dict(zip(z, z_val)))
         u_opt = calc_u_opt(dJdz_val, f2_val, params_dict["Rinv"])
         y[:]  = u_opt
-        print(u_opt)
 
 # %%
 def simulate(J_star, z, params_dict):
@@ -74,7 +73,7 @@ def simulate(J_star, z, params_dict):
 
     proc, zmq_url, web_url = start_zmq_server_as_subprocess(server_args=[])
     viz = ConnectMeshcatVisualizer(builder, scene_graph, zmq_url=zmq_url)
-    # set_orthographic_camera_xy(viz.vis)
+    set_orthographic_camera_xy(viz.vis)
     diagram = builder.Build()
     simulator = Simulator(diagram)
     context = simulator.get_mutable_context()
@@ -82,9 +81,10 @@ def simulate(J_star, z, params_dict):
     acrobot_params = plant.get_parameters(acrobot_context)
     acrobot_params.set_b1(0)
     acrobot_params.set_b2(0)
-    context.SetContinuousState([np.pi-0.1, 0, 0, 0])
+    x0 = np.array([np.pi, 0, 0, 0])
+    context.SetContinuousState(x0 + 0.05*np.random.random(4))
     viz.start_recording()
-    simulator.AdvanceTo(1)
+    simulator.AdvanceTo(5)
     viz.publish_recording()
 
 # %%
@@ -96,11 +96,10 @@ def set_orthographic_camera_xy(vis: meshcat.Visualizer) -> None:
 
 # %%
 params_dict = acrobot_setup()
-poly_deg = 4
-n_mesh = 11
+deg = 4
 prog = MathematicalProgram()
 z = prog.NewIndeterminates(params_dict["nz"], "z")
-with open("acrobot/data/J_{}_{}.pkl".format(poly_deg, n_mesh), "rb") as input_file:
+with open("acrobot/data/sos/J_upper_bound_deg_{}.pkl".format(deg), "rb") as input_file:
     C = pickle.load(input_file)
 J_star = reconstruct_polynomial_from_dict(C, z)
 
