@@ -10,7 +10,7 @@ class TestUtils(unittest.TestCase):
         np.testing.assert_almost_equal(det, det_np)
     
     def test_matrix_adjoint(self):
-        X = np.random.rand(4,4)
+        X = np.random.rand(2,2)
         inv_np = np.linalg.inv(X)
         inv = matrix_adjoint(X)/matrix_det(X)
         np.testing.assert_allclose(inv, inv_np)

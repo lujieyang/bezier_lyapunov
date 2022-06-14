@@ -87,6 +87,10 @@ def construct_monomial_basis_from_polynomial(J, nJ, z):
     return calc_basis
 
 def matrix_adjoint(M):
+    if len(M) == 2:
+        return [[M[1, 1], -M[0, 1]],
+                [-M[1, 0], M[0, 0]]]
+
     cofactors = []
     for r in range(len(M)):
         cofactorRow = []
