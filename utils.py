@@ -85,3 +85,25 @@ def construct_monomial_basis_from_polynomial(J, nJ, z):
         return b
     
     return calc_basis
+
+def matrix_adjoint(M):
+    cofactors = []
+    for r in range(len(M)):
+        cofactorRow = []
+        for c in range(len(M)):
+            minor = matrix_minor(M, r, c)
+            cofactorRow.append(((-1)**(r+c)) * matrix_det(minor))
+        cofactors.append(cofactorRow)
+    return np.array(cofactors).T
+
+def matrix_det(M):
+    if len(M) == 2:
+        return M[0, 0] * M[1, 1]-M[0, 1] * M[1, 0]
+
+    determinant = 0
+    for c in range(len(M)):
+        determinant += ((-1)**c)*M[0, c]*matrix_det(matrix_minor(M, 0, c))
+    return determinant
+
+def matrix_minor(M,i,j):
+    return np.delete(np.delete(M, i, axis=0), j, axis=1)
