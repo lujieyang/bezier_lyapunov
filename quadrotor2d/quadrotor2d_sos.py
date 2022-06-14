@@ -214,12 +214,245 @@ def plot_value_function(J_star, z, z_max, u0, file_name="", plot_states="xy", u_
     fig.colorbar(im)
     plt.savefig("quadrotor2d/figures/{}_policy_{}_u{}.png".format(file_name, plot_states, u_index+1))
 
+def quadrotor2d_constrained_lqr(nz=7, nu=2):
+    quadrotor = Quadrotor2D()
+    m = quadrotor.mass
+    g = quadrotor.gravity
+    r = quadrotor.length
+    I = quadrotor.inertia
+    A = np.zeros([nz, nz])
+    B = np.zeros([nz, nu])
+    A[0, 4] = 1
+    A[1, 5] = 1
+    A[2, 6] = 1
+    A[4, 2] = -g
+    A[5, 3] = g
+    B[5, :] = np.ones(nu)/m
+    B[6, :] = r/I*np.array([1, -1])
+    F = np.zeros(nz)
+    F[3] = 1
+    Q = np.diag([10, 10, 10, 10, 1, 1, r/(2*np.pi)])
+    R = np.array([[0.1, 0.05], [0.05, 0.1]])
+    K, S = LinearQuadraticRegulator(A, B, Q, R, F=F.reshape(1, nz))
+    return K
+
+def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", visualize=False):
+    nz = 7
+    nx = 6
+    nu = 2
+    
+    quadrotor = Quadrotor2D()
+    m = quadrotor.mass
+    g = quadrotor.gravity
+    r = quadrotor.length
+    I = quadrotor.inertia
+    u0 = m * g / 2. * np.array([1, 1])
+    # Map from original state to augmented state.
+    # Uses sympy to be able to do symbolic integration later on.
+    # x = (x, y, theta, xdot, ydot, thetadot)
+    # z = (x, y, s, c, xdot, ydot, thetadot)
+    x2z = lambda x : np.array([x[0], x[1], np.sin(x[2]), np.cos(x[2]), x[3], x[4], x[5]])
+
+    def f(z, u, dtype=Expression):
+        assert len(z) == nz
+        assert len(u) == nu
+        s = z[2]
+        c = z[3]
+        thetadot = z[-1]
+        f_val = np.zeros(nz, dtype=dtype)
+        f_val[:2] = z[4:6]
+        f_val[2] = thetadot * c
+        f_val[3] = -thetadot * s
+        f_val[4] = -s/m*(u[0]+u[1])
+        f_val[5] = c/m*(u[0]+u[1])-g
+        f_val[6] = r/I*(u[0]-u[1])
+        return f_val
+
+    def f2(z, dtype=Expression):
+        assert len(z) == nz
+        s = z[2]
+        c = z[3]
+        f2_val = np.zeros([nz, nu], dtype=dtype)
+        f2_val[4,:] = -s/m*np.ones(nu)
+        f2_val[5,:] = c/m*np.ones(nu)
+        f2_val[6,:] = r/I*np.array([1, -1])
+        return f2_val
+    
+    # State limits (region of state space where we approximate the value function).
+    z_max = np.array([1, 1, np.sin(np.pi/2), 1, 1, 1, 1])
+    z_min = np.array([-1, -1, -np.sin(np.pi/2), 0, -1, -1, -1])
+
+    # Equilibrium point in both the system coordinates.
+    x0 = np.zeros(nx)
+    z0 = x2z(x0)
+    z0[np.abs(z0)<=1e-6] = 0
+        
+    # Quadratic running cost in augmented state.
+    Q = np.diag([10, 10, 10, 10, 1, 1, r/(2*np.pi)])
+    R = np.array([[0.1, 0.05], [0.05, 0.1]])
+    def l_cost(z, u):
+        return (z - z0).dot(Q).dot(z - z0) + (u- u0).dot(R).dot(u - u0)
+
+    Rinv = np.linalg.inv(R)
+
+    xytheta_idx = [0, 1, 4, 5, 6]
+
+    # Set up optimization.        
+    prog = MathematicalProgram()
+    z = prog.NewIndeterminates(nz, 'z')
+    K = quadrotor2d_constrained_lqr()
+    u_fixed = -K @ (z-z0) + u0
+    J = prog.NewFreePolynomial(Variables(z), deg)
+    J_expr = J.ToExpression()
+
+    a = prog.NewSosPolynomial(Variables(z), deg)[0]
+
+    # Minimize volume beneath the a(x).
+    obj = a
+    for i in xytheta_idx:
+        obj = obj.Integrate(z[i], z_min[i], z_max[i])
+    c_r = 1
+    cost = 0
+    for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+        s1_deg = monomial.degree(z[2]) 
+        c1_deg = monomial.degree(z[3])
+        monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, -np.pi/2, np.pi/2)[0]
+        if np.abs(monomial_int1) <=1e-5:
+            monomial_int1 = 0
+        cost += monomial_int1 * coeff
+    poly = Polynomial(cost)
+    cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
+    # Make the numerics better
+    a_cost = prog.AddLinearCost(c_r * cost/np.max(np.abs(cost_coeff)))
+
+    # S procedure for s^2 + c^2 = 1.
+    lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_ring = lam * (z[2]**2 + z[3]**2 - 1)
+
+    # Enforce Bellman inequality.
+    f_val = f(z, u_fixed)
+    J_dot = J_expr.Jacobian(z).dot(f_val)
+    if deg >= 0:
+        S_Jdot = 0
+        # Also constrain theta to be in [-pi/2, pi/2]
+        for i in np.arange(nz):
+            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+            S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        Jdot_inequality = prog.AddSosConstraint(a.ToExpression() - J_dot - l_cost(z, u_fixed) + S_ring + S_Jdot)
+    else:
+        Jdot_inequality = prog.AddSosConstraint(a.ToExpression() - J_dot - l_cost(z, u_fixed) + S_ring)
+
+    # Enforce that value function is PD
+    if deg >= 0:
+        S_J = 0
+        # Also constrain theta to be in [-pi/2, pi/2]
+        for i in np.arange(nz):
+            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+            S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        J_inequality = prog.AddSosConstraint(J_expr + S_J)
+    else:
+        J_inequality = prog.AddSosConstraint(J_expr)
+
+    # Enforce l(x,u)-a(x) is PD
+    u = prog.NewIndeterminates(nu, 'u')
+    if deg >= 0:
+        S_la = 0
+        # Also constrain theta to be in [-pi/2, pi/2]
+        for i in np.arange(nz):
+            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+            S_la += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        la_inequality = prog.AddSosConstraint(l_cost(z,u) - a.ToExpression() + S_la)
+    else:
+        la_inequality = prog.AddSosConstraint(l_cost(z,u) - a.ToExpression())
+
+    # J(z0) = 0.
+    J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
+    prog.AddLinearConstraint(J0 == 0)
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    assert result.is_success()
+    a_star = result.GetSolution(a).RemoveTermsWithSmallCoefficients(1e-6).ToExpression()
+
+    prog.RemoveCost(a_cost)
+    # prog.RemoveConstraint(Jdot_inequality)
+    # prog.RemoveConstraint(J_inequality)
+    # prog.RemoveConstraint(la_inequality)
+
+    # Maximize volume beneath the value function.
+    if objective=="integrate_all":
+        obj = J
+        for i in range(nz):
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        prog.AddCost(-obj.ToExpression())
+    elif objective=="integrate_ring":
+        obj = J
+        for i in xytheta_idx:
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        c_r = 1
+        cost = 0
+        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+            s1_deg = monomial.degree(z[2]) 
+            c1_deg = monomial.degree(z[3])
+            monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, -np.pi/2, np.pi/2)[0]
+            if np.abs(monomial_int1) <=1e-5:
+                monomial_int1 = 0
+            cost += monomial_int1 * coeff
+        poly = Polynomial(cost)
+        cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
+        # Make the numerics better
+        prog.AddLinearCost(c_r * cost/np.max(np.abs(cost_coeff)))
+
+    # Enforce Bellman inequality.
+    if deg >= 0:
+        prog.AddSosConstraint(a_star - J_dot - l_cost(z, u_fixed) + S_ring + S_Jdot)
+    else:
+        prog.AddSosConstraint(a_star - J_dot - l_cost(z, u_fixed) + S_ring)
+
+    # J(z0) = 0.
+    J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
+    prog.AddLinearConstraint(J0 == 0)
+
+    # Solve and retrieve result.
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    assert result.is_success()
+    J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
+    l_val = Polynomial(result.GetSolution(l_cost(z, u_fixed)))
+
+    dJdz = J_star.ToExpression().Jacobian(z)
+    u_star = - .5 * Rinv.dot(f2(z).T).dot(dJdz.T)
+    xdot = f(z, u_star)
+    Jdot = dJdz.dot(xdot)
+    prog1 = MathematicalProgram()
+    prog1.AddIndeterminates(z)
+    lam = prog1.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_ring = lam * (z[2]**2 + z[3]**2 - 1)
+    S_Jdot = 0
+    # Also constrain theta to be in [-pi/2, pi/2]
+    for i in np.arange(nz):
+        lam = prog1.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+        S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+    prog1.AddSosConstraint(-Jdot + S_Jdot + S_ring)
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog1.SetSolverOptions(options)
+    result1 = Solve(prog1)
+    # assert result1.is_success()
+
+    if visualize:
+        plot_value_function(J_star, z, z_max, u0, file_name="upper_bound_constrained_lqr_{}_{}".format(objective, deg), plot_states="xy", u_index=0)
+    return J_star, z
 
 if __name__ == '__main__':
     deg = 2
-    J_star, z = quadrotor2d_sos_lower_bound(deg, visualize=True)
+    J_star, z = quadrotor2d_sos_upper_bound(deg, objective="integrate_ring",visualize=True)
 
     C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("quadrotor2d/data/J_lower_bound_deg_{}.pkl".format(deg),"wb")
+    f = open("quadrotor2d/data/J_upper_bound_deg_{}.pkl".format(deg),"wb")
     pickle.dump(C, f)
     f.close()
