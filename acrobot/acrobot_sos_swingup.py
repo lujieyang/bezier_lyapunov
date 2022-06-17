@@ -11,7 +11,7 @@ from acrobot_swingup_fvi import plot_value_function, acrobot_setup
 # Given the degree for the approximate value function and the polynomials
 # in the S procedure, solves the SOS and returns the approximate value function
 # (together with the objective of the SOS program).
-def acrobot_sos_lower_bound(deg, objective="integrate_ring", visualize=False, test=False):
+def acrobot_sos_lower_bound_implicit_dynamics(deg, objective="integrate_ring", visualize=False, test=False):
     nz = 6
     nq = 2
     nx = 2 * nq
@@ -94,7 +94,7 @@ def acrobot_sos_lower_bound(deg, objective="integrate_ring", visualize=False, te
     
     # State limits (region of state space where we approximate the value function).
     z_max = np.array([1, 1, 1, 1, 1, 1])
-    z_min = np.array([-1, -1, -1, 0, -1, -1])
+    z_min = np.array([-1, -1, -1, 0, -1, -1]) 
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([np.pi, 0, 0, 0])
@@ -107,6 +107,8 @@ def acrobot_sos_lower_bound(deg, objective="integrate_ring", visualize=False, te
     R = np.diag([1]) 
     def l_cost(z, u):
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
+
+    non_sc_idx = [4, 5]
 
     # Set up optimization.
     prog = MathematicalProgram()
@@ -123,7 +125,7 @@ def acrobot_sos_lower_bound(deg, objective="integrate_ring", visualize=False, te
         prog.AddCost(-obj.ToExpression())
     elif objective=="integrate_ring":
         obj = J
-        for i in range(2*nq, nz):
+        for i in non_sc_idx:
             obj = obj.Integrate(z[i], z_min[i], z_max[i])
         c_r = 1
         cost = 0
@@ -134,10 +136,6 @@ def acrobot_sos_lower_bound(deg, objective="integrate_ring", visualize=False, te
             c2_deg = m.degree(z[3])
             monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, 0, 2*np.pi)[0]
             monomial_int2 = quad(lambda x: np.sin(x)**s2_deg * np.cos(x)**c2_deg, 0, np.pi)[0]
-            if np.abs(monomial_int1) <=1e-5:
-                monomial_int1 = 0
-            if np.abs(monomial_int2) <=1e-5:
-                monomial_int2 = 0
             cost += monomial_int1 * monomial_int2 * coeff
         poly = Polynomial(cost)
         cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
@@ -201,6 +199,167 @@ def acrobot_sos_lower_bound(deg, objective="integrate_ring", visualize=False, te
         params_dict["x_max"] = np.array([2*np.pi, np.pi/2, 1, 1])
         params_dict["x_min"] = np.array([0, -np.pi/2, -1, -1])
         plot_value_function(J_star, z, params_dict, deg, file_name="sos/lower_bound_{}".format(objective))
+    return J_star, z
+
+def acrobot_sos_lower_bound_explicit_dynamics(deg, objective="integrate_ring", visualize=False, test=False):
+    nz = 6
+    nq = 2
+    nx = 2 * nq
+    nu = 1
+
+    params = AcrobotParams()
+    m1 = params.m1()
+    m2 = params.m2()
+    l1 = params.l1()
+    lc1 = params.lc1()
+    lc2 = params.lc2()
+    I1 = params.Ic1() + m1*lc1**2
+    I2 = params.Ic2() + m2*lc2**2
+    g = params.gravity()
+    B = np.array([[0], [1]])
+    # Map from original state to augmented state.
+    # Uses sympy to be able to do symbolic integration later on.
+    # x = (theta1, theta2, theta1dot, theta2dot)
+    # z = (s1, c1, s2, c2, theta1dot, theta2dot)
+    x2z = lambda x : np.array([np.sin(x[0]), np.cos(x[0]), np.sin(x[1]), np.cos(x[1]), x[2], x[3]])
+
+    def T(z, dtype=Expression):
+        assert len(z) == nz
+        T = np.zeros([nz, nx], dtype=dtype)
+        T[0, 0] = z[1]
+        T[1, 0] = -z[0]
+        T[2, 1] = z[3]
+        T[3, 1] = -z[2]
+        T[4, 2] = 1
+        T[5, 3] = 1
+        return T
+
+    def f(z, u, dtype=Expression):
+        assert len(z) == nz
+        s1 = z[0]
+        c1 = z[1]
+        s2 = z[2]
+        c2 = z[3]
+        # s12 = sin(theta1 + theta2) = s1c2 + c1s2
+        s12 = s1*c2 + c1*s2
+        qdot = z[4:]
+        M = np.array([[I1 + I2 + m2*l1**2 + 2*m2*l1*lc2*c2,  I2 + m2*l1*lc2*c2],
+        [I2 + m2*l1*lc2*c2, I2]])
+        det_M = matrix_det(M)
+        f_val = np.zeros(nz, dtype=dtype)
+        f_val[0] = qdot[0] * c1 * det_M
+        f_val[1] = -qdot[0] * s1 * det_M
+        f_val[2] = qdot[1] * c2 * det_M
+        f_val[3] = -qdot[1] * s2 * det_M
+        tau_q = np.array([-m1*g*lc1*s1 - m2*g*(l1*s1+lc2*s12),-m2*g*lc2*s12])
+        entry = m2*l1*lc2*s2*qdot[1]
+        C = np.array([[-2*entry, -entry],
+        [m2*l1*lc2*s2*qdot[0], 0]])
+        f_val[4:] = matrix_adjoint(M) @ (tau_q - C@qdot + B @ u)
+        return f_val, det_M
+
+    if test:
+         return f, T
+
+    # State limits (region of state space where we approximate the value function).
+    dz = 0.01
+    z_max = np.array([np.sin(np.pi-dz), np.cos(np.pi-dz), np.sin(dz), 1, dz, dz])
+    z_min = np.array([-np.sin(np.pi-dz), -1, -np.sin(dz), np.cos(dz), -dz, -dz])
+
+    # Equilibrium point in both the system coordinates.
+    x0 = np.array([np.pi, 0, 0, 0])
+    z0 = x2z(x0)
+    z0[np.abs(z0)<=1e-6] = 0
+        
+    # Quadratic running cost in augmented state.
+    # Q = np.diag([1e5, 1e5, 1e5, 1e5, 5e4, 5e4])
+    Q = np.diag([1000, 1000, 1000, 1000, 500, 500])
+    R = np.diag([1]) 
+    def l_cost(z, u):
+        return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
+
+    Rinv = np.linalg.inv(R)
+
+    non_sc_idx = [4, 5]
+
+    # Set up optimization.        
+    prog = MathematicalProgram()
+    z = prog.NewIndeterminates(nz, 'z')
+    u = prog.NewIndeterminates(nu, 'u')
+    J = prog.NewFreePolynomial(Variables(z), deg)
+    J_expr = J.ToExpression()
+
+    # S procedure for s^2 + c^2 = 1.
+    lam_01 = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    lam_23 = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_ring = lam_01 * (z[0]**2 + z[1]**2 - 1) + lam_23 * (z[2]**2 + z[3]**2 - 1)
+
+    # Enforce Bellman inequality.
+    f_val, det_M = f(z, u)
+    J_dot = J_expr.Jacobian(z).dot(f_val)
+    if deg >= 0:
+        S_Jdot = 0
+        # Also constrain theta to be in [-pi/2, pi/2]
+        for i in np.arange(nz):
+            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+            S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        prog.AddSosConstraint(J_dot + l_cost(z, u) * det_M + S_ring + S_Jdot)
+    else:
+        prog.AddSosConstraint(J_dot + l_cost(z, u) * det_M + S_ring)
+
+    # Enforce that value function is PD
+    if deg >= 0:
+        S_J = 0
+        # Also constrain theta to be in [-pi/2, pi/2]
+        for i in np.arange(nz):
+            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+            S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        prog.AddSosConstraint(J_expr + S_J)
+    else:
+        prog.AddSosConstraint(J_expr)
+
+    # J(z0) = 0.
+    J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
+    prog.AddLinearConstraint(J0 == 0)
+
+    # Maximize volume beneath the value function.
+    if objective=="integrate_all":
+        obj = J
+        for i in range(nz):
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        prog.AddCost(-obj.ToExpression())
+    elif objective=="integrate_ring":
+        obj = J
+        for i in non_sc_idx:
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        c_r = 1
+        cost = 0
+        for m,coeff in obj.monomial_to_coefficient_map().items(): 
+            s1_deg = m.degree(z[0]) 
+            c1_deg = m.degree(z[1])
+            s2_deg = m.degree(z[2]) 
+            c2_deg = m.degree(z[3])
+            monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, np.pi-dz, np.pi+dz)[0]
+            monomial_int2 = quad(lambda x: np.sin(x)**s2_deg * np.cos(x)**c2_deg, -dz, dz)[0]
+            cost += monomial_int1 * monomial_int2 * coeff
+        poly = Polynomial(cost)
+        cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
+        # Make the numerics better
+        prog.AddLinearCost(-c_r * cost/np.max(np.abs(cost_coeff)))
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    assert result.is_success()
+    J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
+    l_val = Polynomial(result.GetSolution(l_cost(z, u)))
+
+    if visualize:
+        params_dict = acrobot_setup()
+        params_dict["x_max"] = np.array([np.pi+dz, dz, z_max[-2], z_max[-1]])
+        params_dict["x_min"] = np.array([np.pi-dz, -dz,  z_min[-2], z_min[-1]])
+        plot_value_function(J_star, z, params_dict, deg, file_name="sos/lower_bound_explicit_dynamics_{}".format(objective))
     return J_star, z
 
 def acrobot_constrained_lqr(nz=6, nu=1):
@@ -299,8 +458,9 @@ def acrobot_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", visual
          return f, T
 
     # State limits (region of state space where we approximate the value function).
-    z_max = np.array([np.sin(np.pi-0.02), np.cos(np.pi-0.02), np.sin(0.02), 1, 0.02, 0.02])
-    z_min = np.array([-np.sin(np.pi-0.02), -1, -np.sin(0.02), np.cos(0.02), -0.02, -0.02])
+    dz = 0.01
+    z_max = np.array([np.sin(np.pi-dz), np.cos(np.pi-dz), np.sin(dz), 1, dz, dz])
+    z_min = np.array([-np.sin(np.pi-dz), -1, -np.sin(dz), np.cos(dz), -dz, -dz])
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([np.pi, 0, 0, 0])
@@ -339,38 +499,42 @@ def acrobot_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", visual
         c1_deg = m.degree(z[1])
         s2_deg = m.degree(z[2]) 
         c2_deg = m.degree(z[3])
-        monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, np.pi-0.02, np.pi+0.02)[0]
-        monomial_int2 = quad(lambda x: np.sin(x)**s2_deg * np.cos(x)**c2_deg, -0.02, 0.02)[0]
+        monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, np.pi-dz, np.pi+dz)[0]
+        monomial_int2 = quad(lambda x: np.sin(x)**s2_deg * np.cos(x)**c2_deg, -dz, dz)[0]
         cost += monomial_int1 * monomial_int2 * coeff
     poly = Polynomial(cost)
     cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
     # Make the numerics better
     a_cost = prog.AddLinearCost(c_r * cost/np.max(np.abs(cost_coeff)))
 
-    # S procedure for s^2 + c^2 = 1.
-    lam_01 = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
-    lam_23 = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
-    S_ring = lam_01 * (z[0]**2 + z[1]**2 - 1) + lam_23 * (z[2]**2 + z[3]**2 - 1)
-
     # Enforce Bellman inequality.
     f_val, det_M = f(z, u_fixed)
     J_dot = J_expr.Jacobian(z).dot(f_val)
+    LHS = a.ToExpression() * det_M - J_dot - l_cost(z, u_fixed) * det_M
+
+    lam_deg = Polynomial(LHS).TotalDegree()-2
+
+    # S procedure for s^2 + c^2 = 1.
+    lam_01 = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    lam_23 = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    S_ring = lam_01 * (z[0]**2 + z[1]**2 - 1) + lam_23 * (z[2]**2 + z[3]**2 - 1)
+
     if deg >= 0:
         S_Jdot = 0
         # Also constrain theta to be in [-pi/2, pi/2]
         for i in np.arange(nz):
-            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+            lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
             S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-        prog.AddSosConstraint(a.ToExpression() * det_M - J_dot - l_cost(z, u_fixed) * det_M + S_ring + S_Jdot)
+        prog.AddSosConstraint(LHS + S_ring + S_Jdot)
     else:
-        prog.AddSosConstraint(a.ToExpression() * det_M - J_dot - l_cost(z, u_fixed) * det_M + S_ring)
+        prog.AddSosConstraint(LHS + S_ring)
 
     # Enforce that value function is PD
     if deg >= 0:
         S_J = 0
         # Also constrain theta to be in [-pi/2, pi/2]
         for i in np.arange(nz):
-            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+            lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
             S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
         prog.AddSosConstraint(J_expr + S_J)
     else:
@@ -418,8 +582,8 @@ def acrobot_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", visual
             c1_deg = m.degree(z[1])
             s2_deg = m.degree(z[2]) 
             c2_deg = m.degree(z[3])
-            monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, np.pi-0.02, np.pi+0.02)[0]
-            monomial_int2 = quad(lambda x: np.sin(x)**s2_deg * np.cos(x)**c2_deg, -0.02, 0.02)[0]
+            monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, np.pi-dz, np.pi+dz)[0]
+            monomial_int2 = quad(lambda x: np.sin(x)**s2_deg * np.cos(x)**c2_deg, -dz, dz)[0]
             cost += monomial_int1 * monomial_int2 * coeff
         poly = Polynomial(cost)
         cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
@@ -459,8 +623,8 @@ def acrobot_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", visual
 
     if visualize:
         params_dict = acrobot_setup()
-        params_dict["x_max"] = np.array([np.pi+0.02, 0.02, z_max[-2], z_max[-1]])
-        params_dict["x_min"] = np.array([np.pi-0.02, -0.02,  z_min[-2], z_min[-1]])
+        params_dict["x_max"] = np.array([np.pi+dz, dz, z_max[-2], z_max[-1]])
+        params_dict["x_min"] = np.array([np.pi-dz, -dz,  z_min[-2], z_min[-1]])
         plot_value_function(J_star, z, params_dict, deg, file_name="sos/upper_bound_constrained_LQR_{}".format(objective))
     return J_star, z
 
@@ -536,7 +700,7 @@ def acrobot_sos_iterative_upper_bound(deg, deg_lower=0, objective="integrate_rin
         return f2_val
 
     if test:
-         return f, f2, T
+         return nz, f, f2, T
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([np.pi, 0, 0, 0])
@@ -584,30 +748,35 @@ def acrobot_sos_iterative_upper_bound(deg, deg_lower=0, objective="integrate_rin
         cost = cost/np.max(np.abs(cost_coeff))
         a_cost = prog.AddLinearCost(c_r * cost)
 
-        # S procedure for s^2 + c^2 = 1.
-        lam_01 = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
-        lam_23 = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
-        S_ring = lam_01 * (z[0]**2 + z[1]**2 - 1) + lam_23 * (z[2]**2 + z[3]**2 - 1)
-
         # Enforce Bellman inequality.
         f_val, det_M = f(z, u_fixed, u_denominator=u_denominator)
         J_dot = J_expr.Jacobian(z).dot(f_val)
+        LHS = a.ToExpression() * det_M * u_denominator - J_dot - l_cost(z, u_fixed) * det_M * u_denominator
+
+        # Need higher degree lambda's for polynomial u_denominator
+        lam_deg = Polynomial(LHS).TotalDegree() - 2
+
+        # S procedure for s^2 + c^2 = 1.
+        lam_01 = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+        lam_23 = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+        S_ring = lam_01 * (z[0]**2 + z[1]**2 - 1) + lam_23 * (z[2]**2 + z[3]**2 - 1)
+
         if deg >= 0:
             S_Jdot = 0
             # Also constrain theta to be in [-pi/2, pi/2]
             for i in np.arange(nz):
-                lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+                lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
                 S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-            prog.AddSosConstraint(a.ToExpression() * det_M * u_denominator - J_dot - l_cost(z, u_fixed) * det_M * u_denominator + S_ring + S_Jdot)
+            prog.AddSosConstraint(LHS + S_ring + S_Jdot)
         else:
-            prog.AddSosConstraint(a.ToExpression() * det_M * u_denominator - J_dot - l_cost(z, u_fixed) * det_M * u_denominator + S_ring)
+            prog.AddSosConstraint(LHS + S_ring)
 
         # Enforce that value function is PD
         if deg >= 0:
             S_J = 0
             # Also constrain theta to be in [-pi/2, pi/2]
             for i in np.arange(nz):
-                lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+                lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
                 S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
             prog.AddSosConstraint(J_expr + S_J)
         else:
@@ -633,46 +802,50 @@ def acrobot_sos_iterative_upper_bound(deg, deg_lower=0, objective="integrate_rin
         options.SetOption(CommonSolverOption.kPrintToConsole, 1)
         prog.SetSolverOptions(options)
         result = Solve(prog)
-        # assert result.is_success()
+        assert result.is_success()
         a_star = result.GetSolution(a).RemoveTermsWithSmallCoefficients(1e-6).ToExpression()
+        J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
         prog.RemoveCost(a_cost)
 
-        # Maximize volume beneath the value function.
-        if objective=="integrate_all":
-            obj = J
-            for i in range(nz):
-                obj = obj.Integrate(z[i], z_min[i], z_max[i])
-            prog.AddCost(-obj.ToExpression())
-        elif objective=="integrate_ring":
-            obj = J
-            for i in non_sc_idx:
-                obj = obj.Integrate(z[i], z_min[i], z_max[i])
-            c_r = 1
-            cost = 0
-            for m,coeff in obj.monomial_to_coefficient_map().items(): 
-                s1_deg = m.degree(z[0]) 
-                c1_deg = m.degree(z[1])
-                s2_deg = m.degree(z[2]) 
-                c2_deg = m.degree(z[3])
-                monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, np.pi-dz, np.pi+dz)[0]
-                monomial_int2 = quad(lambda x: np.sin(x)**s2_deg * np.cos(x)**c2_deg, -dz, dz)[0]
-                cost += monomial_int1 * monomial_int2 * coeff
-            poly = Polynomial(cost)
-            cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
-            # Make the numerics better
-            cost = cost/np.max(np.abs(cost_coeff))
-            prog.AddLinearCost(c_r * cost)
+        try:
+            # Maximize volume beneath the value function.
+            if objective=="integrate_all":
+                obj = J
+                for i in range(nz):
+                    obj = obj.Integrate(z[i], z_min[i], z_max[i])
+                prog.AddCost(-obj.ToExpression())
+            elif objective=="integrate_ring":
+                obj = J
+                for i in non_sc_idx:
+                    obj = obj.Integrate(z[i], z_min[i], z_max[i])
+                c_r = 1
+                cost = 0
+                for m,coeff in obj.monomial_to_coefficient_map().items(): 
+                    s1_deg = m.degree(z[0]) 
+                    c1_deg = m.degree(z[1])
+                    s2_deg = m.degree(z[2]) 
+                    c2_deg = m.degree(z[3])
+                    monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, np.pi-dz, np.pi+dz)[0]
+                    monomial_int2 = quad(lambda x: np.sin(x)**s2_deg * np.cos(x)**c2_deg, -dz, dz)[0]
+                    cost += monomial_int1 * monomial_int2 * coeff
+                poly = Polynomial(cost)
+                cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
+                # Make the numerics better
+                cost = cost/np.max(np.abs(cost_coeff))
+                prog.AddLinearCost(c_r * cost)
 
-        # Enforce Bellman inequality.
-        if deg >= 0:
-            prog.AddSosConstraint(a_star * det_M * u_denominator - J_dot - l_cost(z, u_fixed) * det_M * u_denominator + S_ring + S_Jdot)
-        else:
-            prog.AddSosConstraint(a_star * det_M * u_denominator - J_dot - l_cost(z, u_fixed) * det_M * u_denominator + S_ring)
+            # Enforce Bellman inequality.
+            if deg >= 0:
+                prog.AddSosConstraint(a_star * det_M * u_denominator - J_dot - l_cost(z, u_fixed) * det_M * u_denominator + S_ring + S_Jdot)
+            else:
+                prog.AddSosConstraint(a_star * det_M * u_denominator - J_dot - l_cost(z, u_fixed) * det_M * u_denominator + S_ring)
 
-        result = Solve(prog)
-        assert result.is_success()
-        J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
+            result = Solve(prog)
+            assert result.is_success()
+            J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
+        except:
+            print("Eq(11) fails...")       
 
         dJdz = J_star.ToExpression().Jacobian(z)
         f2_val = f2(z)
@@ -684,34 +857,39 @@ def acrobot_sos_iterative_upper_bound(deg, deg_lower=0, objective="integrate_rin
     K = acrobot_constrained_lqr()
     u_fixed = -K @ (z-z0)
     old_J = Polynomial(np.ones(nz)@z)
-    dz = 0.024
+    dz = 0.01
     u_denominator = 1
-    for i in range(2):
-        # try:
+    for i in range(10):
+        try:
             J_star, u_fixed, u_denominator, z_max = search_upper_bound(u_fixed, dz, u_denominator=u_denominator)
-            # dz += z_incre
+            dz += z_incre
             if J_star.CoefficientsAlmostEqual(old_J, 1e-3):
                 print("="*10, "Converged!","="*20)
                 print("Iter. ", i)
                 break
             old_J = J_star
-        # except:
-        #     # dz -= z_incre
-        #     z_incre = 0
 
+            if visualize:
+                params_dict = acrobot_setup()
+                params_dict["x_max"] = np.array([np.pi+dz, dz, z_max[-2], z_max[-1]])
+                params_dict["x_min"] = np.array([np.pi-dz, -dz,  -z_max[-2], -z_max[-1]])
+                plot_value_function(J_star, z, params_dict, deg, file_name="Q_10/iterative_{}_upper_bound_{}".format(i, objective))
+            
+            C = extract_polynomial_coeff_dict(J_star, z)
+            data_file = open("acrobot/data/sos/Q_10/J_iterative_{}_upper_bound_deg_{}.pkl".format(i, deg),"wb")
+            pickle.dump(C, data_file)
+            data_file.close()
+        except:
+            dz -= z_incre
+            z_incre /= 2
+            if z_incre <=1e-5:
+                break
+            dz += z_incre
+    
+    print("Verified dz: ", dz)
 
-    if visualize:
-        params_dict = acrobot_setup()
-        params_dict["x_max"] = np.array([np.pi+dz, dz, z_max[-2], z_max[-1]])
-        params_dict["x_min"] = np.array([np.pi-dz, -dz,  -z_max[-2], -z_max[-1]])
-        plot_value_function(J_star, z, params_dict, deg, file_name="sos/iterative_upper_bound_{}".format(objective))
     return J_star, z
 
 if __name__ == '__main__':
-    deg = 4
+    deg = 2
     J_star, z = acrobot_sos_iterative_upper_bound(deg, visualize=True)
-
-    C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("acrobot/data/sos/J_upper_bound_deg_{}.pkl".format(deg),"wb")
-    pickle.dump(C, f)
-    f.close()
