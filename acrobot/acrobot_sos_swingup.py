@@ -644,7 +644,7 @@ def acrobot_sos_iterative_upper_bound(deg, deg_lower=0, objective="integrate_rin
     I2 = params.Ic2() + m2*lc2**2
     g = params.gravity()
     B = np.array([[0], [1]])
-    u_max = np.array([1000])
+    u_max = np.array([90])
     u_min = -u_max
     # Map from original state to augmented state.
     # Uses sympy to be able to do symbolic integration later on.
@@ -808,7 +808,7 @@ def acrobot_sos_iterative_upper_bound(deg, deg_lower=0, objective="integrate_rin
 
         # Actuator saturation
         LHS_limits = []
-        Sus = []
+        Su_limits = []
         S_ring_limits = []
         S_Jdot_limits = []
         if actuator_saturate:
@@ -829,13 +829,13 @@ def acrobot_sos_iterative_upper_bound(deg, deg_lower=0, objective="integrate_rin
                 lam_u_deg = Polynomial(LHS_limit).TotalDegree() - Polynomial(u_fixed[0]).TotalDegree()
                 lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
                 if u_limit[0] < 0:
-                    Su = lam_u*(u_fixed[0] - u_limit[0])
+                    Su_limit = lam_u*(u_fixed[0] - u_limit[0])
                 else:
-                    Su = lam_u*(u_limit[0] - u_fixed[0])
-                Sus.append(Su)
+                    Su_limit = lam_u*(u_limit[0] - u_fixed[0])
+                Su_limits.append(Su_limit)
                 S_ring_limits.append(S_ring_limit)
                 S_Jdot_limits.append(S_Jdot_limit)
-                prog.AddSosConstraint(LHS_limit + S_ring_limit + S_Jdot_limit + Su)
+                prog.AddSosConstraint(LHS_limit + S_ring_limit + S_Jdot_limit + Su_limit)
 
         options = SolverOptions()
         options.SetOption(CommonSolverOption.kPrintToConsole, 1)
@@ -878,10 +878,12 @@ def acrobot_sos_iterative_upper_bound(deg, deg_lower=0, objective="integrate_rin
                 prog.AddLinearCost(c_r * cost)
 
             # Enforce Bellman inequality.
-            prog.AddSosConstraint(LHS_a_star + S_ring + S_Jdot)
             if actuator_saturate:
-                for i in range(len(Sus)):
-                        prog.AddSosConstraint(LHS_limits_a_star[i] + S_ring_limits[i] + S_Jdot_limits[i] + Sus[i])
+                prog.AddSosConstraint(LHS_a_star + S_ring + S_Jdot + Su)
+                for i in range(len(Su_limits)):
+                        prog.AddSosConstraint(LHS_limits_a_star[i] + S_ring_limits[i] + S_Jdot_limits[i] + Su_limits[i])
+            else:
+                prog.AddSosConstraint(LHS_a_star + S_ring + S_Jdot)
             # if deg >= 0:
             #     prog.AddSosConstraint(a_star * det_M * u_denominator - J_dot - l_cost(z, u_fixed) * det_M * u_denominator + S_ring + S_Jdot)
             # else:
@@ -906,6 +908,7 @@ def acrobot_sos_iterative_upper_bound(deg, deg_lower=0, objective="integrate_rin
     dz = 0.01
     u_denominator = 1
     for i in range(10):
+        print("Iter.", i)
         try:
             J_star, u_fixed, u_denominator, z_max = search_upper_bound(u_fixed, dz, u_denominator=u_denominator)
             if J_star.CoefficientsAlmostEqual(old_J, 1e-3):
@@ -937,5 +940,5 @@ def acrobot_sos_iterative_upper_bound(deg, deg_lower=0, objective="integrate_rin
     return J_star, z
 
 if __name__ == '__main__':
-    deg = 4
-    J_star, z = acrobot_sos_iterative_upper_bound(deg, visualize=True)
+    deg = 2
+    J_star, z = acrobot_sos_iterative_upper_bound(deg, visualize=True, actuator_saturate=False)
