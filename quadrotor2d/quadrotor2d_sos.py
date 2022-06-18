@@ -58,8 +58,8 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
         return f2_val
     
     # State limits (region of state space where we approximate the value function).
-    z_max = np.array([1, 1, 1, 1, 4.5, 4.5, 3])
-    z_min = np.array([-1, -1, -1, -1, -4.5, -4.5, -3])
+    z_max = np.array([1, 1, np.sin(np.pi/2), 1, 1, 1, 1])
+    z_min = np.array([-1, -1, -np.sin(np.pi/2), 0, -1, -1, -1])
 
     # Equilibrium point in both the system coordinates.
     x0 = np.zeros(nx)
@@ -121,7 +121,7 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
     J_dot = J_expr.Jacobian(z).dot(f_val)
     if deg <= 0:
         S_Jdot = 0
-        for i in xytheta_idx:
+        for i in np.arange(nz):
             lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
             S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
         prog.AddSosConstraint(J_dot + l_cost(z, u) + S_ring + S_Jdot)
@@ -131,7 +131,7 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
     # Enforce that value function is PD
     if deg <= 0:
         S_J = 0
-        for i in xytheta_idx:
+        for i in np.arange(nz):
             lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
             S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
         prog.AddSosConstraint(J_expr + S_J)
@@ -151,10 +151,10 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
     if visualize:
-        plot_value_function(J_star, z, z_max, u0, file_name="lower_bound_{}_{}".format(objective, deg), plot_states="xy", u_index=0)
+        plot_value_function(J_star, z, z_max, u0, file_name="lower_bound_{}_{}".format(objective, deg), plot_states="xtheta", u_index=0)
     return J_star, z
 
-def plot_value_function(J_star, z, z_max, u0, file_name="", plot_states="xy", u_index=0):
+def plot_value_function(J_star, z, z_max, u0, file_name="", plot_states="xy", u_index=0, actuator_saturate=False):
     nz = 7
     x_max = np.zeros(6)
     x_max[:2] = z_max[:2]
@@ -189,6 +189,8 @@ def plot_value_function(J_star, z, z_max, u0, file_name="", plot_states="xy", u_
         for n in range(nz): 
             dJdz_val[n] = dJdz[n].Evaluate(dict(zip(z, z_val)))
         U[i] = calc_u_opt(dJdz_val, f2_val, Rinv)[u_index] + u0[u_index]
+        if actuator_saturate:
+            U[i] = np.clip(U[i], 0, 2.5*u0[0])
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -236,7 +238,7 @@ def quadrotor2d_constrained_lqr(nz=7, nu=2):
     K, S = LinearQuadraticRegulator(A, B, Q, R, F=F.reshape(1, nz))
     return K
 
-def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", visualize=False):
+def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", visualize=False, actuator_saturate=True):
     nz = 7
     nx = 6
     nu = 2
@@ -247,6 +249,8 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
     r = quadrotor.length
     I = quadrotor.inertia
     u0 = m * g / 2. * np.array([1, 1])
+    u_max = 2.5 * u0
+    u_min = np.zeros(nu)
     # Map from original state to augmented state.
     # Uses sympy to be able to do symbolic integration later on.
     # x = (x, y, theta, xdot, ydot, thetadot)
@@ -332,15 +336,17 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
     # Enforce Bellman inequality.
     f_val = f(z, u_fixed)
     J_dot = J_expr.Jacobian(z).dot(f_val)
+    LHS = a.ToExpression() - J_dot - l_cost(z, u_fixed)
     if deg >= 0:
         S_Jdot = 0
         # Also constrain theta to be in [-pi/2, pi/2]
         for i in np.arange(nz):
             lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
             S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-        Jdot_inequality = prog.AddSosConstraint(a.ToExpression() - J_dot - l_cost(z, u_fixed) + S_ring + S_Jdot)
+        if not actuator_saturate:
+            prog.AddSosConstraint(LHS + S_ring + S_Jdot)
     else:
-        Jdot_inequality = prog.AddSosConstraint(a.ToExpression() - J_dot - l_cost(z, u_fixed) + S_ring)
+        prog.AddSosConstraint(LHS + S_ring)
 
     # Enforce that value function is PD
     if deg >= 0:
@@ -349,9 +355,9 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
         for i in np.arange(nz):
             lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
             S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-        J_inequality = prog.AddSosConstraint(J_expr + S_J)
+        prog.AddSosConstraint(J_expr + S_J)
     else:
-        J_inequality = prog.AddSosConstraint(J_expr)
+        prog.AddSosConstraint(J_expr)
 
     # Enforce l(x,u)-a(x) is PD
     u = prog.NewIndeterminates(nu, 'u')
@@ -361,13 +367,77 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
         for i in np.arange(nz):
             lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
             S_la += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-        la_inequality = prog.AddSosConstraint(l_cost(z,u) - a.ToExpression() + S_la)
+        prog.AddSosConstraint(l_cost(z,u) - a.ToExpression() + S_la)
     else:
-        la_inequality = prog.AddSosConstraint(l_cost(z,u) - a.ToExpression())
+        prog.AddSosConstraint(l_cost(z,u) - a.ToExpression())
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
     prog.AddLinearConstraint(J0 == 0)
+
+    # Actuator saturation
+    if actuator_saturate:
+        LHS_limits = []
+        Su_limits = []
+        S_ring_limits = []
+        S_Jdot_limits = []   
+        for k in range(3): #(-inf, u_min),[u_min, u_max], (u_max, inf) 
+            u_limit = np.zeros(nu, dtype=Expression)
+            Su_limit = 0
+            if k == 0:
+                u_limit[0] = u_min[0]
+            elif k == 1:
+                u_limit[0] = u_fixed[0]
+            elif k == 2:
+                u_limit[0] = u_max[0]
+            for n in range(3):
+                if n == 0:
+                    u_limit[1] = u_min[1]
+                elif n == 1:
+                    u_limit[1] = u_fixed[1]
+                elif n == 2:
+                    u_limit[1] = u_max[1]
+
+                f_limit = f(z, u_limit)
+                J_dot_limit = J_expr.Jacobian(z).dot(f_limit)
+                LHS_limit = a.ToExpression() - J_dot_limit - l_cost(z, u_limit)
+                LHS_limits.append(LHS_limit)
+
+                lam_u_deg = Polynomial(LHS_limit).TotalDegree() - np.max([Polynomial(u_limit[0]).TotalDegree(), Polynomial(u_limit[1]).TotalDegree()])
+                if k == 0:
+                    lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
+                    Su_limit += lam_u*(u_fixed[0] - u_min[0])
+                elif k == 1:
+                    lam_u_min = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
+                    lam_u_max = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
+                    Su_limit += lam_u_max*(u_fixed[0] - u_max[0]) + lam_u_min*(u_min[0] - u_fixed[0])
+                elif k == 2:
+                    lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
+                    Su_limit += lam_u*(u_max[0] - u_fixed[0])
+
+                if n == 0:
+                    lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
+                    Su_limit += lam_u*(u_fixed[1] - u_min[1])
+                elif n == 1:
+                    lam_u_min = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
+                    lam_u_max = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
+                    Su_limit += lam_u_max*(u_fixed[0] - u_max[1]) + lam_u_min*(u_min[1] - u_fixed[0])
+                elif n == 2:
+                    lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
+                    Su_limit += lam_u*(u_max[1] - u_fixed[1])
+
+                lam_limit_deg = Polynomial(LHS_limit).TotalDegree() - 2
+                lam_23 = prog.NewFreePolynomial(Variables(z), lam_limit_deg).ToExpression()
+                S_ring_limit = lam_23 * (z[2]**2 + z[3]**2 - 1)
+                S_Jdot_limit = 0
+                for i in np.arange(nz):
+                    lam = prog.NewSosPolynomial(Variables(z), lam_limit_deg)[0].ToExpression()
+                    S_Jdot_limit += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+
+                Su_limits.append(Su_limit)
+                S_ring_limits.append(S_ring_limit)
+                S_Jdot_limits.append(S_Jdot_limit)
+                prog.AddSosConstraint(LHS_limit + S_ring_limit + S_Jdot_limit + Su_limit)
 
     options = SolverOptions()
     options.SetOption(CommonSolverOption.kPrintToConsole, 1)
@@ -375,11 +445,11 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
     result = Solve(prog)
     assert result.is_success()
     a_star = result.GetSolution(a).RemoveTermsWithSmallCoefficients(1e-6).ToExpression()
-
+    LHS_a_star = result.GetSolution(LHS)
+    if actuator_saturate:
+        LHS_limits_a_star = [result.GetSolution(x) for x in LHS_limits]
+    
     prog.RemoveCost(a_cost)
-    # prog.RemoveConstraint(Jdot_inequality)
-    # prog.RemoveConstraint(J_inequality)
-    # prog.RemoveConstraint(la_inequality)
 
     # Maximize volume beneath the value function.
     if objective=="integrate_all":
@@ -406,10 +476,11 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
         prog.AddLinearCost(c_r * cost/np.max(np.abs(cost_coeff)))
 
     # Enforce Bellman inequality.
-    if deg >= 0:
-        prog.AddSosConstraint(a_star - J_dot - l_cost(z, u_fixed) + S_ring + S_Jdot)
+    if actuator_saturate:
+        for i in range(len(Su_limits)):
+                prog.AddSosConstraint(LHS_limits_a_star[i] + S_ring_limits[i] + S_Jdot_limits[i] + Su_limits[i])
     else:
-        prog.AddSosConstraint(a_star - J_dot - l_cost(z, u_fixed) + S_ring)
+        prog.AddSosConstraint(LHS_a_star + S_ring + S_Jdot)
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
@@ -424,28 +495,8 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
     l_val = Polynomial(result.GetSolution(l_cost(z, u_fixed)))
 
-    dJdz = J_star.ToExpression().Jacobian(z)
-    u_star = - .5 * Rinv.dot(f2(z).T).dot(dJdz.T)
-    xdot = f(z, u_star)
-    Jdot = dJdz.dot(xdot)
-    prog1 = MathematicalProgram()
-    prog1.AddIndeterminates(z)
-    lam = prog1.NewFreePolynomial(Variables(z), deg).ToExpression()
-    S_ring = lam * (z[2]**2 + z[3]**2 - 1)
-    S_Jdot = 0
-    # Also constrain theta to be in [-pi/2, pi/2]
-    for i in np.arange(nz):
-        lam = prog1.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-        S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-    prog1.AddSosConstraint(-Jdot + S_Jdot + S_ring)
-    options = SolverOptions()
-    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
-    prog1.SetSolverOptions(options)
-    result1 = Solve(prog1)
-    # assert result1.is_success()
-
     if visualize:
-        plot_value_function(J_star, z, z_max, u0, file_name="upper_bound_constrained_lqr_{}_{}".format(objective, deg), plot_states="xy", u_index=0)
+        plot_value_function(J_star, z, z_max, u0, file_name="saturation/upper_bound_constrained_lqr_{}_{}".format(objective, deg), plot_states="xy", u_index=0, actuator_saturate=actuator_saturate)
     return J_star, z
 
 if __name__ == '__main__':
@@ -453,6 +504,6 @@ if __name__ == '__main__':
     J_star, z = quadrotor2d_sos_upper_bound(deg, objective="integrate_ring",visualize=True)
 
     C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("quadrotor2d/data/J_upper_bound_deg_{}.pkl".format(deg),"wb")
+    f = open("quadrotor2d/data/saturation/J_upper_bound_deg_{}.pkl".format(deg),"wb")
     pickle.dump(C, f)
     f.close()
