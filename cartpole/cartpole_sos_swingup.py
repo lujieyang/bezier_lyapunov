@@ -3,7 +3,7 @@ from scipy.integrate import quad
 from utils import extract_polynomial_coeff_dict, reconstruct_polynomial_from_dict
 import pickle
 from pydrake.all import (MathematicalProgram, Variables, Expression, Solve, Polynomial, SolverOptions, CommonSolverOption, 
-Linearize, LinearQuadraticRegulator, DiagramBuilder, AddMultibodyPlantSceneGraph, Parser)
+Linearize, LinearQuadraticRegulator, DiagramBuilder, AddMultibodyPlantSceneGraph, Parser, MakeVectorVariable)
 
 # from underactuated import FindResource
 from cartpole_swingup_fvi import plot_value_function, cartpole_setup
@@ -326,18 +326,19 @@ def cartpole_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
     # Set up optimization.        
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz, 'z')
-    # with open("cartpole/data/sos/J_lower_bound_deg_{}.pkl".format(deg_lower), "rb") as input_file:
-    #     C = pickle.load(input_file)
-    # J_lower = reconstruct_polynomial_from_dict(C, z)
-    # T_val = T(z)
-    # f2_val, u_denominator = f2(z, T_val)
-    # dJdz = J_lower.Jacobian(z)
-    # u_fixed = - .5 * Rinv.dot(f2_val.T).dot(dJdz.T)
+    if deg_lower == 2:
+        K, _ = cartpole_constrained_lqr()
+        u_fixed = np.array([-K@(z-z0)])
+        u_denominator = 1
+    else:
+        with open("cartpole/data/sos/J_lower_bound_deg_{}.pkl".format(deg_lower), "rb") as input_file:
+            C = pickle.load(input_file)
+        J_lower = reconstruct_polynomial_from_dict(C, z)
+        T_val = T(z)
+        f2_val, u_denominator = f2(z, T_val)
+        dJdz = J_lower.Jacobian(z)
+        u_fixed = - .5 * Rinv.dot(f2_val.T).dot(dJdz.T)
 
-    # Check if u_fixed is stabilizing
-    K, _ = cartpole_constrained_lqr()
-    u_fixed = np.array([-K@(z-z0)])
-    u_denominator = 1
     J = prog.NewFreePolynomial(Variables(z), deg)
     J_expr = J.ToExpression()
 
@@ -356,7 +357,7 @@ def cartpole_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
     poly = Polynomial(cost)
     cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
     # Make the numerics better
-    cost = cost/np.max(np.abs(cost_coeff))
+    cost = Polynomial(cost/np.max(np.abs(cost_coeff))).RemoveTermsWithSmallCoefficients(1e-6).ToExpression()
     a_cost = prog.AddLinearCost(cost)
 
     # Enforce Bellman inequality.
@@ -458,12 +459,240 @@ def cartpole_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
         plot_value_function(J_star, z, params_dict, deg, file_name="sos/upper_bound_{}_lower_deg_{}".format(objective, deg_lower))
     return J_star, z
 
+def cartpole_sos_iterative_upper_bound(deg, deg_lower, objective="integrate_ring", visualize=False):
+    nz = 5
+    nq = 2
+    nx = 2 * nq
+    nu = 1
+
+    mc = 10
+    mp = 1
+    l = .5
+    g = 9.81
+    
+    # Map from original state to augmented state.
+    # Uses sympy to be able to do symbolic integration later on.
+    # x = (x, theta, xdot, thetadot)
+    # z = (x, s, c, xdot, thetadot)
+    x2z = lambda x : np.array([x[0], np.sin(x[1]), np.cos(x[1]), x[2], x[3]])
+
+    def T(z, dtype=Expression):
+        assert len(z) == nz
+        T = np.zeros([nz, nx], dtype=dtype)
+        T[0, 0] = 1
+        T[1, 1] = z[2]
+        T[2, 1] = -z[1]
+        T[3, 2] = 1
+        T[4, 3] = 1
+        return T
+
+    def f(z, u, T, u_denominator=1):
+        assert len(z) == nz
+        s = z[1]
+        c = z[2]
+        qdot = z[-nq:]
+        denominator = (mc+mp*s**2)
+        f_val = np.zeros(nx, dtype=Expression)
+        f_val[:nq] = qdot * denominator * u_denominator
+        f_val[2] = (u + mp*s*(l*qdot[1]**2+g*c) * u_denominator)[0]
+        f_val[3] = ((-u*c - mp*l*qdot[1]**2*c*s * u_denominator - (mc+mp)*g*s * u_denominator)/l)[0]
+        return T @ f_val, denominator
+    
+    def f2(z, T, dtype=Expression):
+        assert len(z) == nz
+        s = z[1]
+        c = z[2]
+        denominator = (mc+mp*s**2)
+        f2_val = np.zeros([nx, nu], dtype=dtype)
+        f2_val[2, :] = 1
+        f2_val[3, :] =-c/l
+        return T@f2_val, denominator
+
+    # State limits (region of state space where we approximate the value function).
+    z_max = np.array([2, 1, 1, 5, 5])
+    z_min = -z_max
+
+    # Equilibrium point in both the system coordinates.
+    x0 = np.array([0, np.pi, 0, 0])
+    z0 = x2z(x0)
+    z0[np.abs(z0)<=1e-6] = 0
+        
+    # Quadratic running cost in augmented state.
+    Q = np.diag([10, 10, 10, 1, 1])
+    R = np.diag([1]) 
+    def l_cost(z, u):
+        return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
+
+    Rinv = np.linalg.inv(R)
+
+    non_sc_idx = [0, 3, 4]
+
+    # Fixed control law from lower bound
+    # Set up optimization.        
+    def search_upper_bound(u_fixed, u_denominator=1):
+        prog = MathematicalProgram()
+        prog.AddIndeterminates(z)
+        J = prog.NewFreePolynomial(Variables(z), deg)
+        J_expr = J.ToExpression()
+
+        a = prog.NewSosPolynomial(Variables(z), deg)[0]
+
+        # Minimize volume beneath the a(x).
+        obj = a
+        for i in non_sc_idx:
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        cost = 0
+        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+            s_deg = monomial.degree(z[1]) 
+            c_deg = monomial.degree(z[2])
+            monomial_int = quad(lambda x: np.sin(x)**s_deg * np.cos(x)**c_deg, 0, 2*np.pi)[0]
+            if np.abs(monomial_int) <=1e-6:
+                monomial_int = 0
+            cost += monomial_int * coeff
+        poly = Polynomial(cost)
+        cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
+        # Make the numerics better
+        cost = cost/np.max(np.abs(cost_coeff))
+        a_cost = prog.AddLinearCost(cost)
+
+        # Enforce Bellman inequality.
+        T_val = T(z)
+        f_val, denominator = f(z, u_fixed, T_val, u_denominator=u_denominator)
+        J_dot = J_expr.Jacobian(z).dot(f_val)
+        LHS = a.ToExpression()* denominator*u_denominator  - J_dot - l_cost(z, u_fixed) * denominator*u_denominator
+        
+        lam_deg = Polynomial(LHS).TotalDegree() - 2
+        # S procedure for s^2 + c^2 = 1.
+        lam = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+        S_procedure = lam * (z[1]**2 + z[2]**2 - 1)
+
+        S_Jdot = 0
+        # Also constrain theta to be in [-pi/2, pi/2]
+        for i in np.arange(nz):
+            lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
+            S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        prog.AddSosConstraint(LHS + S_procedure + S_Jdot)
+
+        S_J = 0
+        # Also constrain theta to be in [-pi/2, pi/2]
+        for i in np.arange(nz):
+            lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
+            S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        # Enforce that value function is PD
+        prog.AddSosConstraint(J_expr + S_J)
+
+        # Enforce l(x,u)-a(x) is PD
+        u = prog.NewIndeterminates(nu, 'u')
+        S_la = 0
+        # Also constrain theta to be in [-pi/2, pi/2]
+        for i in np.arange(nz):
+            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+            S_la += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        prog.AddSosConstraint(l_cost(z,u) - a.ToExpression() + S_la)
+
+        # J(z0) = 0.
+        J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
+        prog.AddLinearConstraint(J0 == 0)
+
+        options = SolverOptions()
+        options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+        prog.SetSolverOptions(options)
+        result = Solve(prog)
+        assert result.is_success()
+        a_star = result.GetSolution(a).RemoveTermsWithSmallCoefficients(1e-6).ToExpression()
+        LHS_a_star = result.GetSolution(LHS)
+
+        prog.RemoveCost(a_cost)
+
+        # Maximize volume beneath the value function.
+        if objective=="integrate_all":
+            obj = J
+            for i in range(nz):
+                obj = obj.Integrate(z[i], z_min[i], z_max[i])
+            prog.AddCost(-obj.ToExpression())
+        elif objective=="integrate_ring":
+            obj = J
+            for i in non_sc_idx:
+                obj = obj.Integrate(z[i], z_min[i], z_max[i])
+            cost = 0
+            for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+                s_deg = monomial.degree(z[1]) 
+                c_deg = monomial.degree(z[2])
+                monomial_int = quad(lambda x: np.sin(x)**s_deg * np.cos(x)**c_deg, 0, 2*np.pi)[0]
+                cost += monomial_int * coeff
+            poly = Polynomial(cost)
+            cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
+            # Make the numerics better
+            cost = cost/np.max(np.abs(cost_coeff))
+            prog.AddLinearCost(cost)
+
+        # Enforce Bellman inequality.
+        prog.AddSosConstraint(LHS_a_star + S_procedure + S_Jdot)
+
+        # J(z0) = 0.
+        J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
+        prog.AddLinearConstraint(J0 == 0)
+
+        # Solve and retrieve result.
+        options = SolverOptions()
+        options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+        prog.SetSolverOptions(options)
+        result = Solve(prog)
+        assert result.is_success()
+        J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
+
+        # Solve for the optimal feedback in augmented coordinates.
+        T_val = T(z)
+        f2_val, u_denominator = f2(z, T_val)
+        dJdz = J_star.ToExpression().Jacobian(z)
+        u_star = - .5 * Rinv.dot(f2_val.T).dot(dJdz.T)
+        return J_star, u_star, u_denominator
+    
+    z = MakeVectorVariable(nz, "z")
+    old_J = Polynomial(np.ones(nz)@z)
+    if deg_lower == 2:
+        # Constrained LQR controller
+        K, _ = cartpole_constrained_lqr()
+        u_fixed = np.array([-K@(z-z0)])
+        u_denominator = 1
+    else:
+        with open("cartpole/data/sos/J_lower_bound_deg_{}.pkl".format(deg_lower), "rb") as input_file:
+            C = pickle.load(input_file)
+        J_lower = reconstruct_polynomial_from_dict(C, z)
+        T_val = T(z)
+        f2_val, u_denominator = f2(z, T_val)
+        dJdz = J_lower.Jacobian(z)
+        u_fixed = - .5 * Rinv.dot(f2_val.T).dot(dJdz.T)
+
+    for i in range(10):
+        print("Iter.", i)
+        J_star, u_fixed, u_denominator = search_upper_bound(u_fixed, u_denominator=u_denominator)
+        if J_star.CoefficientsAlmostEqual(old_J, 1e-3):
+            print("="*10, "Converged!","="*20)
+            print("Iter. ", i)
+            break
+        old_J = J_star
+
+        if visualize:
+            params_dict = cartpole_setup()
+            params_dict["x_max"] = np.array([2, 2*np.pi, 5, 5])
+            params_dict["x_min"] = np.array([-2, 0, -5, -5])
+            plot_value_function(J_star, z, params_dict, deg, file_name="sos/iterative_{}_upper_bound_{}_lower_deg_{}".format(i, objective, deg_lower))
+        
+        C = extract_polynomial_coeff_dict(J_star, z)
+        data_file = open("cartpole/data/sos/J_iterative_{}_upper_bound_lower_deg_{}_deg_{}.pkl".format(i, deg_lower, deg),"wb")
+        pickle.dump(C, data_file)
+        data_file.close()
+
+    return J_star, z
+
 if __name__ == '__main__':
     deg = 6
-    deg_lower = 4
-    J_star, z = cartpole_sos_upper_bound_relaxed(deg, deg_lower, visualize=True)
+    deg_lower = 2
+    # J_star, z = cartpole_sos_upper_bound_relaxed(deg, deg_lower, visualize=True)
+    J_star, z = cartpole_sos_iterative_upper_bound(deg, deg_lower, visualize=True)
 
-    C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("cartpole/data/sos/J_upper_bound_lower_deg_{}_deg_{}.pkl".format(deg_lower, deg),"wb")
-    pickle.dump(C, f)
-    f.close()
+    # C = extract_polynomial_coeff_dict(J_star, z)
+    # f = open("cartpole/data/sos/J_upper_bound_lower_deg_{}_deg_{}.pkl".format(deg_lower, deg),"wb")
+    # pickle.dump(C, f)
+    # f.close()
