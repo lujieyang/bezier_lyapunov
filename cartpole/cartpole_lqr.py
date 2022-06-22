@@ -3,6 +3,7 @@ from pydrake.all import (LinearQuadraticRegulator, DiagramBuilder, AddMultibodyP
                          MeshcatVisualizerCpp, Simulator, StartMeshcat, Parser, LeafSystem, Linearize,
                          BasicVector)
 from underactuated import FindResource
+from cartpole_sos_swingup import cartpole_constrained_lqr, cartpole_lqr
 
 import matplotlib.pyplot as plt
 from matplotlib import cm
@@ -49,30 +50,25 @@ class Controller(LeafSystem):
         y = output.get_mutable_value()
         y[:]  = -self.K@(x-self.x0)
 
+class ConstrainedLQR(LeafSystem):
+    def __init__(self):
+        LeafSystem.__init__(self)
+        self.K = cartpole_constrained_lqr()[0]
+        self.x0 = np.array([0, np.pi, 0, 0])
+        self.x2z = lambda x : np.array([x[0], np.sin(x[1]), np.cos(x[1]), x[2], x[3]])
+        self.z0 = self.x2z(self.x0)
+        self.state_input_port = self.DeclareVectorInputPort(
+            "state", BasicVector(4))
+        self.policy_output_port = self.DeclareVectorOutputPort(
+            "policy", BasicVector(1), self.CalculateController)
+        
+    def CalculateController(self, context, output):
+        x = self.state_input_port.Eval(context)
+        y = output.get_mutable_value()
+        z = self.x2z(x)
+        y[:]  = -self.K@(z-self.z0) 
+
 def cartpole_balancing_example():
-    def BalancingLQR(plant):
-        # Design an LQR controller for stabilizing the CartPole around the upright.
-        # Returns a (static) AffineSystem that implements the controller (in
-        # the original CartPole coordinates).
-
-        context = plant.CreateDefaultContext()
-        plant.get_actuation_input_port().FixValue(context, [0])
-
-        context.get_mutable_continuous_state_vector().SetFromVector(UprightState())
-
-        Q = np.diag((10., 10., 1., 1.))
-        R = [1]
-
-        # MultibodyPlant has many (optional) input ports, so we must pass the
-        # input_port_index to LQR.
-        return LinearQuadraticRegulator(
-            plant,
-            context,
-            Q,
-            R,
-            input_port_index=plant.get_actuation_input_port().get_index())
-
-
     builder = DiagramBuilder()
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.0)
     file_name = FindResource("models/cartpole.urdf")
@@ -80,7 +76,7 @@ def cartpole_balancing_example():
     plant.Finalize()
 
     # controller = builder.AddSystem(BalancingLQR(plant))
-    controller = builder.AddSystem(Controller())
+    controller = builder.AddSystem(ConstrainedLQR())
     builder.Connect(plant.get_state_output_port(), controller.get_input_port(0))
     builder.Connect(controller.get_output_port(0),
                     plant.get_actuation_input_port())
@@ -88,7 +84,7 @@ def cartpole_balancing_example():
     # Setup visualization
     meshcat.Delete()
     meshcat.Set2dRenderMode(xmin=-2.5, xmax=2.5, ymin=-1.0, ymax=2.5)
-    MeshcatVisualizerCpp.AddToBuilder(builder, scene_graph, meshcat)
+    viz = MeshcatVisualizerCpp.AddToBuilder(builder, scene_graph, meshcat)
 
     diagram = builder.Build()
 
@@ -99,11 +95,14 @@ def cartpole_balancing_example():
     # Simulate
     simulator.set_target_realtime_rate(1.0)
     duration = 5.0 
-    for i in range(5):
+    viz.StartRecording()
+    for i in range(1):
         context.SetTime(0.)
-        context.SetContinuousState(UprightState() + 0.5 * np.random.randn(4,))
+        context.SetContinuousState([0, np.pi-1, 0, 0])
         simulator.Initialize()
         simulator.AdvanceTo(duration)
+    viz.StopRecording()
+    viz.PublishRecording()
 
 def plot_lqr_cost_to_go(x_min, x_max):
     builder = DiagramBuilder()
@@ -167,7 +166,7 @@ def plot_lqr_cost_to_go(x_min, x_max):
     plt.savefig("cartpole/figures/lqr_policy.png")
 
 if __name__ == '__main__':
-    # cartpole_balancing_example()
-    x_max = np.array([2, 2*np.pi, 3, 3])
-    x_min = np.array([-2, 0, -3, -3])
-    plot_lqr_cost_to_go(x_min, x_max)
+    cartpole_balancing_example()
+    # x_max = np.array([2, 2*np.pi, 3, 3])
+    # x_min = np.array([-2, 0, -3, -3])
+    # plot_lqr_cost_to_go(x_min, x_max)
