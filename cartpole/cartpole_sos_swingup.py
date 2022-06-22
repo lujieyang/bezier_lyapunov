@@ -173,7 +173,7 @@ def cartpole_sos_lower_bound(deg, objective="integrate_ring", visualize=False, t
         plot_value_function(J_star, z, params_dict, deg, file_name="sos/lower_bound_{}".format(objective))
     return J_star, u_star, z
 
-def cartpole_lqr():
+def cartpole_lqr(nz=5):
     builder = DiagramBuilder()
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.0)
     file_name = FindResource("models/cartpole.urdf")
@@ -197,7 +197,12 @@ def cartpole_lqr():
     Q = np.diag((2., 2., 1., 1.))
     R = [1]
     K, S = LinearQuadraticRegulator(A, B, Q, R)
-    return np.squeeze(K)
+    K = np.squeeze(K)
+    Kz = np.zeros(nz)
+    Kz[:2] = K[:2]
+    Kz[-2:] = K[-2:] 
+    S = np.insert(np.insert(S, 2, np.zeros(4), axis=0), 2, np.zeros(5), axis=1)
+    return Kz, S
 
 def cartpole_constrained_lqr():
     nz = 5
@@ -222,33 +227,32 @@ def cartpole_constrained_lqr():
     return np.squeeze(K), S
 
 def cartpole_lqr_ROA():
-    nz, f, f2, T, z0, Rinv = cartpole_sos_lower_bound(2, test=True)
+    nz, f, f2, T, z0, Rinv = cartpole_sos_iterative_upper_bound(2, 2, test=True)
     K, S = cartpole_constrained_lqr()
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz, "nz")
     V = (z-z0).dot(S).dot(z-z0) + 1e-4 * (z-z0).dot(z-z0)
-    u_star = -K @ (z-z0)
+    u_star = np.array([-K @ (z-z0)])
     dVdz = V.Jacobian(z)
-    # f2_val, u_denominator = f2(z)
-    # u_star = - .5 * Rinv.dot(f2_val.T).dot(dVdz.T)
-    # u_denominator = 1
     T_val = T(z)
-    f_val, _ = f(z, u_star, T_val)
+    # f2_val, u_denominator = f2(z, T_val)
+    # u_star = - .5 * Rinv.dot(f2_val.T).dot(dVdz.T)
+    u_denominator = 1
+    f_val, denominator = f(z, u_star, T_val, u_denominator=u_denominator)
     V_dot = dVdz.dot(f_val)
-    lam_deg = 2
-    lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
-    # lam = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    lam_deg = 4 + Polynomial(denominator * u_denominator).TotalDegree() - Polynomial(V_dot).TotalDegree()
+    lam_deg = int(np.ceil(lam_deg/2)*2)
+    # lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
+    lam = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
     rho = prog.NewContinuousVariables(1, 'rho')[0]
 
-    prog.AddSosConstraint((z-z0).dot(z-z0)*(V - rho) - lam*V_dot)
+    prog.AddSosConstraint((z-z0).dot(z-z0)*(V - rho)*denominator*u_denominator - lam*V_dot)
 
-    # insert here the objective function (maximize rho)
     prog.AddLinearCost(-rho)
 
     options = SolverOptions()
     options.SetOption(CommonSolverOption.kPrintToConsole, 1)
     prog.SetSolverOptions(options)
-    # solve SOS program
     result = Solve(prog)
 
     print("rho: ", result.GetSolution(rho))
@@ -281,13 +285,13 @@ def cartpole_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
         T[4, 3] = 1
         return T
 
-    def f(z, u, T, u_denominator=1):
+    def f(z, u, T, dtype=Expression, u_denominator=1):
         assert len(z) == nz
         s = z[1]
         c = z[2]
         qdot = z[-nq:]
         denominator = (mc+mp*s**2)
-        f_val = np.zeros(nx, dtype=Expression)
+        f_val = np.zeros(nx, dtype=dtype)
         f_val[:nq] = qdot * denominator * u_denominator
         f_val[2] = (u + mp*s*(l*qdot[1]**2+g*c) * u_denominator)[0]
         f_val[3] = ((-u*c - mp*l*qdot[1]**2*c*s * u_denominator - (mc+mp)*g*s * u_denominator)/l)[0]
@@ -331,7 +335,7 @@ def cartpole_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
         u_fixed = np.array([-K@(z-z0)])
         u_denominator = 1
     else:
-        with open("cartpole/data/sos/J_lower_bound_deg_{}.pkl".format(deg_lower), "rb") as input_file:
+        with open("cartpole/data/sos/J_upper_bound_lower_deg_2_deg_{}.pkl".format(deg_lower), "rb") as input_file:
             C = pickle.load(input_file)
         J_lower = reconstruct_polynomial_from_dict(C, z)
         T_val = T(z)
@@ -391,7 +395,7 @@ def cartpole_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
     S_la = 0
     # Also constrain theta to be in [-pi/2, pi/2]
     for i in np.arange(nz):
-        lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+        lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
         S_la += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
     prog.AddSosConstraint(l_cost(z,u) - a.ToExpression() + S_la)
 
@@ -459,7 +463,7 @@ def cartpole_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
         plot_value_function(J_star, z, params_dict, deg, file_name="sos/upper_bound_{}_lower_deg_{}".format(objective, deg_lower))
     return J_star, z
 
-def cartpole_sos_iterative_upper_bound(deg, deg_lower, objective="integrate_ring", visualize=False):
+def cartpole_sos_iterative_upper_bound(deg, deg_lower, objective="integrate_ring", visualize=False, test=False):
     nz = 5
     nq = 2
     nx = 2 * nq
@@ -486,13 +490,13 @@ def cartpole_sos_iterative_upper_bound(deg, deg_lower, objective="integrate_ring
         T[4, 3] = 1
         return T
 
-    def f(z, u, T, u_denominator=1):
+    def f(z, u, T, dtype=Expression, u_denominator=1):
         assert len(z) == nz
         s = z[1]
         c = z[2]
         qdot = z[-nq:]
         denominator = (mc+mp*s**2)
-        f_val = np.zeros(nx, dtype=Expression)
+        f_val = np.zeros(nx, dtype=dtype)
         f_val[:nq] = qdot * denominator * u_denominator
         f_val[2] = (u + mp*s*(l*qdot[1]**2+g*c) * u_denominator)[0]
         f_val[3] = ((-u*c - mp*l*qdot[1]**2*c*s * u_denominator - (mc+mp)*g*s * u_denominator)/l)[0]
@@ -524,6 +528,9 @@ def cartpole_sos_iterative_upper_bound(deg, deg_lower, objective="integrate_ring
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
 
     Rinv = np.linalg.inv(R)
+
+    if test:
+        return nz, f, f2, T, z0, Rinv
 
     non_sc_idx = [0, 3, 4]
 
@@ -586,7 +593,7 @@ def cartpole_sos_iterative_upper_bound(deg, deg_lower, objective="integrate_ring
         S_la = 0
         # Also constrain theta to be in [-pi/2, pi/2]
         for i in np.arange(nz):
-            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+            lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
             S_la += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
         prog.AddSosConstraint(l_cost(z,u) - a.ToExpression() + S_la)
 
@@ -687,10 +694,11 @@ def cartpole_sos_iterative_upper_bound(deg, deg_lower, objective="integrate_ring
     return J_star, z
 
 if __name__ == '__main__':
-    deg = 6
+    deg = 2
     deg_lower = 2
+    cartpole_lqr_ROA()
     # J_star, z = cartpole_sos_upper_bound_relaxed(deg, deg_lower, visualize=True)
-    J_star, z = cartpole_sos_iterative_upper_bound(deg, deg_lower, visualize=True)
+    # # J_star, z = cartpole_sos_iterative_upper_bound(deg, deg_lower, visualize=True)
 
     # C = extract_polynomial_coeff_dict(J_star, z)
     # f = open("cartpole/data/sos/J_upper_bound_lower_deg_{}_deg_{}.pkl".format(deg_lower, deg),"wb")
