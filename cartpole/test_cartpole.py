@@ -3,6 +3,7 @@ import numpy as np
 from cartpole_swingup_fvi import cartpole_setup
 from pydrake.all import (DiagramBuilder, AddMultibodyPlantSceneGraph, Parser, MultibodyPlantConfig)
 from underactuated import FindResource
+from cartpole_sos_swingup import cartpole_sos_iterative_upper_bound
 
 class TestAcrobot(unittest.TestCase):
     def test_M(self):
@@ -44,6 +45,22 @@ class TestAcrobot(unittest.TestCase):
         vdot_matrix = np.linalg.inv(M)@(tau + np.array([u, 0]) - Cv)
 
         np.testing.assert_allclose(f_val.astype(float), T_val@f.CopyToVector())
+
+    def test_upper_bound(self):
+        nz, f_func, f2, T = cartpole_sos_iterative_upper_bound(2, 2, test=True)
+        x2z = params_dict["x2z"]
+        z = x2z(x)
+        u = 1
+
+        T_val = T(z, float)
+        f2_bar, u_denominator = f2(z, T_val, float)
+        u_bar = np.array([- np.ones(nz).dot(np.squeeze(f2_bar))])
+        f_val, denominator = f_func(z, u_bar, T_val, dtype=float, u_denominator=u_denominator)
+        u = u_bar/u_denominator
+        plant.get_actuation_input_port().FixValue(context, u)
+        f = plant.AllocateTimeDerivatives()
+        plant.CalcTimeDerivatives(context, f)
+        np.testing.assert_allclose(f_val/u_denominator/denominator, T_val@f.CopyToVector())
 
 if __name__ == '__main__':
     builder = DiagramBuilder()

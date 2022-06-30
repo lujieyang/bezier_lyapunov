@@ -235,18 +235,20 @@ def cartpole_lqr_ROA():
     u_star = np.array([-K @ (z-z0)])
     dVdz = V.Jacobian(z)
     T_val = T(z)
+    u_denominator = 1
     # f2_val, u_denominator = f2(z, T_val)
     # u_star = - .5 * Rinv.dot(f2_val.T).dot(dVdz.T)
-    u_denominator = 1
     f_val, denominator = f(z, u_star, T_val, u_denominator=u_denominator)
     V_dot = dVdz.dot(f_val)
-    lam_deg = 4 + Polynomial(denominator * u_denominator).TotalDegree() - Polynomial(V_dot).TotalDegree()
+    lhs_deg = 4 + Polynomial(denominator * u_denominator).TotalDegree()
+    lam_deg = lhs_deg - Polynomial(V_dot).TotalDegree()
     lam_deg = int(np.ceil(lam_deg/2)*2)
-    # lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
+    lam_r_deg = lhs_deg - 2
+    lam_r = prog.NewFreePolynomial(Variables(z), lam_r_deg).ToExpression()
     lam = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
     rho = prog.NewContinuousVariables(1, 'rho')[0]
 
-    prog.AddSosConstraint((z-z0).dot(z-z0)*(V - rho)*denominator*u_denominator - lam*V_dot)
+    prog.AddSosConstraint((z-z0).dot(z-z0)*(V - rho)*denominator*u_denominator - lam*V_dot + lam_r*(z[1]**2+z[2]**2-1))
 
     prog.AddLinearCost(-rho)
 
@@ -256,6 +258,49 @@ def cartpole_lqr_ROA():
     result = Solve(prog)
 
     print("rho: ", result.GetSolution(rho))
+    return rho
+
+def cartpole_lqr_ROA_line_search():
+    nz, f, f2, T, z0, Rinv = cartpole_sos_iterative_upper_bound(2, 2, test=True)
+    K, S = cartpole_constrained_lqr()
+    z = MakeVectorVariable(nz, "z")
+    V = (z-z0).dot(S).dot(z-z0) + 1e-4 * (z-z0).dot(z-z0)
+    u_star = np.array([-K @ (z-z0)])
+    dVdz = V.Jacobian(z)
+    T_val = T(z)
+    u_denominator = 1
+    f_val, denominator = f(z, u_star, T_val, u_denominator=u_denominator)
+    V_dot = dVdz.dot(f_val)
+    lhs_deg = Polynomial(V_dot).TotalDegree()
+    lam_deg = lhs_deg - 2 - Polynomial(denominator * u_denominator).TotalDegree()
+    lam_deg = int(np.ceil(lam_deg/2)*2)
+    lam_r_deg = lhs_deg - 2
+    def verify(rho):
+        prog = MathematicalProgram()
+        prog.AddIndeterminates(z)
+
+        lam_r = prog.NewFreePolynomial(Variables(z), lam_r_deg).ToExpression()
+        lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
+
+        prog.AddSosConstraint(lam*(V - rho)*denominator*u_denominator - V_dot + lam_r*(z[1]**2+z[2]**2-1))
+
+        options = SolverOptions()
+        options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+        prog.SetSolverOptions(options)
+        result = Solve(prog)
+
+        return result.is_success()
+    
+    rho = 0
+    rho_step = 1e-3
+    while True:
+        if verify(rho):
+            rho += rho_step
+        else:
+            rho -= rho_step
+            break
+
+    print("rho: ", rho)
     return rho
 
 def cartpole_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring", visualize=False):
