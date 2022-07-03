@@ -1,6 +1,8 @@
 import sys
 sys.path.append("../underactuated")
 
+import os
+
 import numpy as np
 from scipy.integrate import quad
 from utils import extract_polynomial_coeff_dict, calc_u_opt 
@@ -286,8 +288,11 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
         return f2_val
     
     # State limits (region of state space where we approximate the value function).
-    z_max = np.array([1, 1, np.sin(np.pi/2), 1, 1, 1, 1])
-    z_min = np.array([-1, -1, -np.sin(np.pi/2), 0, -1, -1, -1])
+    z_max = np.array([1, 1, np.sin(np.pi/2), 1, 3, 3, 3])
+    z_min = np.array([-1, -1, -np.sin(np.pi/2), 0, -3, -3, -3])
+
+    os.makedirs("quadrotor2d/data/saturation/{}".format(z_max), exist_ok=True)
+    os.makedirs("quadrotor2d/figures/saturation/{}".format(z_max), exist_ok=True)
 
     # Equilibrium point in both the system coordinates.
     x0 = np.zeros(nx)
@@ -499,14 +504,14 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
     l_val = Polynomial(result.GetSolution(l_cost(z, u_fixed)))
 
     if visualize:
-        plot_value_function(J_star, z, z_max, u0, file_name="saturation/upper_bound_constrained_lqr_{}_{}".format(objective, deg), plot_states="xy", u_index=0, actuator_saturate=actuator_saturate)
-    return J_star, z
+        plot_value_function(J_star, z, z_max, u0, file_name="saturation/{}/upper_bound_constrained_lqr_{}_{}".format(z_max, objective, deg), plot_states="xy", u_index=0, actuator_saturate=actuator_saturate)
+    return J_star, z, z_max
 
 if __name__ == '__main__':
     deg = 2
-    J_star, z = quadrotor2d_sos_upper_bound(deg, objective="integrate_ring",visualize=True)
+    J_star, z, z_max = quadrotor2d_sos_upper_bound(deg, objective="integrate_ring",visualize=True)
 
     C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("quadrotor2d/data/saturation/J_upper_bound_deg_{}.pkl".format(deg),"wb")
+    f = open("quadrotor2d/data/saturation/{}/J_upper_bound_deg_{}.pkl".format(z_max, deg),"wb")
     pickle.dump(C, f)
     f.close()
