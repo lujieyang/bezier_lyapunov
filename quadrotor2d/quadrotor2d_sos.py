@@ -12,6 +12,9 @@ from underactuated.quadrotor2d import Quadrotor2D
 import matplotlib.pyplot as plt
 from matplotlib import cm
 
+import matplotlib
+matplotlib.use('Agg')
+
 # Given the degree for the approximate value function and the polynomials
 # in the S procedure, solves the SOS and returns the approximate value function
 # (together with the objective of the SOS program).
@@ -421,7 +424,7 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
                 elif n == 1:
                     lam_u_min = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
                     lam_u_max = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                    Su_limit += lam_u_max*(u_fixed[0] - u_max[1]) + lam_u_min*(u_min[1] - u_fixed[0])
+                    Su_limit += lam_u_max*(u_fixed[1] - u_max[1]) + lam_u_min*(u_min[1] - u_fixed[1])
                 elif n == 2:
                     lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
                     Su_limit += lam_u*(u_max[1] - u_fixed[1])
