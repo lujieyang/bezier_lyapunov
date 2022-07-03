@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 from scipy.integrate import quad
-from utils import extract_polynomial_coeff_dict, calc_u_opt 
+from utils import extract_polynomial_coeff_dict, calc_u_opt , reconstruct_polynomial_from_dict
 import pickle
 from pydrake.all import (MathematicalProgram, Variables, Expression, Solve, Polynomial, SolverOptions, CommonSolverOption, 
 Linearize, LinearQuadraticRegulator, DiagramBuilder, AddMultibodyPlantSceneGraph, Parser)
@@ -80,7 +80,7 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
     Rinv = np.linalg.inv(R)
 
     if test:
-        return nz, f, f2, x2z, Rinv
+        return nz, f, f2, x2z, Rinv, z0
 
     xytheta_idx = [0, 1, 4, 5, 6]
 
@@ -241,7 +241,39 @@ def quadrotor2d_constrained_lqr(nz=7, nu=2):
     Q = np.diag([10, 10, 10, 10, 1, 1, r/(2*np.pi)])
     R = np.array([[0.1, 0.05], [0.05, 0.1]])
     K, S = LinearQuadraticRegulator(A, B, Q, R, F=F.reshape(1, nz))
-    return K
+    return K, S
+
+def quadrotor2d_lqr_ROA():
+    nz, f, f2, x2z, Rinv, z0 = quadrotor2d_sos_lower_bound(2, test=True)
+    prog = MathematicalProgram()
+    z = prog.NewIndeterminates(nz, "nz")
+    K, S = quadrotor2d_constrained_lqr()
+    V = (z-z0).dot(S).dot(z-z0) + 1e-4 * (z-z0).dot(z-z0)
+    u_star = -K @ (z-z0)
+    dVdz = V.Jacobian(z)
+    f2_val = f2(z)
+    u_star = - .5 * Rinv.dot(f2_val.T).dot(dVdz.T)
+    f_val = f(z, u_star)
+    V_dot = dVdz.dot(f_val)
+    lhs_deg = 4
+    lam_deg = lhs_deg - Polynomial(V_dot).TotalDegree()
+    lam_deg = int(np.ceil(lam_deg/2)*2)
+    lam_r_deg = lhs_deg - 2
+    lam_r = prog.NewFreePolynomial(Variables(z), lam_r_deg).ToExpression()
+    lam = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    rho = prog.NewContinuousVariables(1, 'rho')[0]
+
+    prog.AddSosConstraint((z-z0).dot(z-z0)*(V - rho) - lam*V_dot + lam_r*(z[1]**2+z[2]**2-1))
+
+    prog.AddLinearCost(-rho)
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+
+    print("rho: ", result.GetSolution(rho))
+    return rho
 
 def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", visualize=False, actuator_saturate=True):
     nz = 7
@@ -288,8 +320,8 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
         return f2_val
     
     # State limits (region of state space where we approximate the value function).
-    z_max = np.array([1, 1, np.sin(np.pi/2), 1, 3, 3, 3])
-    z_min = np.array([-1, -1, -np.sin(np.pi/2), 0, -3, -3, -3])
+    z_max = np.array([2, 2, np.sin(np.pi/2), 1, 3, 3, 3])
+    z_min = np.array([-2, -2, -np.sin(np.pi/2), 0, -3, -3, -3])
 
     os.makedirs("quadrotor2d/data/saturation/{}".format(z_max), exist_ok=True)
     os.makedirs("quadrotor2d/figures/saturation/{}".format(z_max), exist_ok=True)
@@ -312,7 +344,7 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
     # Set up optimization.        
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz, 'z')
-    K = quadrotor2d_constrained_lqr()
+    K, _ = quadrotor2d_constrained_lqr()
     u_fixed = -K @ (z-z0) + u0
     J = prog.NewFreePolynomial(Variables(z), deg)
     J_expr = J.ToExpression()
@@ -508,10 +540,11 @@ def quadrotor2d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
     return J_star, z, z_max
 
 if __name__ == '__main__':
-    deg = 2
-    J_star, z, z_max = quadrotor2d_sos_upper_bound(deg, objective="integrate_ring",visualize=True)
+    quadrotor2d_lqr_ROA()
+    # deg = 2
+    # J_star, z, z_max = quadrotor2d_sos_upper_bound(deg, objective="integrate_ring",visualize=True)
 
-    C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("quadrotor2d/data/saturation/{}/J_upper_bound_deg_{}.pkl".format(z_max, deg),"wb")
-    pickle.dump(C, f)
-    f.close()
+    # C = extract_polynomial_coeff_dict(J_star, z)
+    # f = open("quadrotor2d/data/saturation/{}/J_upper_bound_deg_{}.pkl".format(z_max, deg),"wb")
+    # pickle.dump(C, f)
+    # f.close()
