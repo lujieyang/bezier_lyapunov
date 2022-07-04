@@ -157,7 +157,7 @@ def quadrotor2d_sos_lower_bound(deg, objective="integrate_ring", visualize=False
         plot_value_function(J_star, z, z_max, u0, file_name="lower_bound_{}_{}".format(objective, deg), plot_states="xy", u_index=0)
     return J_star, z
 
-def plot_value_function(J_star, u_star, z, z_max, z_min, u0, file_name="", plot_states="xy", u_index=0):
+def plot_value_function(J_star, u_star, z, z_max, z_min, u0, file_name="", plot_states="xy", u_index=0, actuator_saturate=""):
     zero_vector = np.zeros([51*51, 1])
     qwxyz = np.zeros([51*51, 4])
     xyzdot_w = np.zeros([51*51, 6])
@@ -180,6 +180,8 @@ def plot_value_function(J_star, u_star, z, z_max, z_min, u0, file_name="", plot_
         z_val = np.squeeze(Z[i])
         J[i] = J_star.Evaluate(dict(zip(z, z_val)))
         U[i] = u_star[u_index].Evaluate(dict(zip(z, z_val))) + u0[u_index]
+        if actuator_saturate != "":
+            U[i] = np.clip(U[i], 0, 2.5*u0[u_index])
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -191,7 +193,7 @@ def plot_value_function(J_star, u_star, z, z_max, z_min, u0, file_name="", plot_
             extent=(z_min[4], z_max[4], z_max[y_limit_idx], z_min[y_limit_idx]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("quadrotor3d/figures/{}_{}.png".format(file_name, plot_states))
+    plt.savefig("quadrotor3d/figures/{}/{}_{}.png".format(actuator_saturate, file_name, plot_states))
 
     fig = plt.figure(figsize=(9, 4))
     ax = fig.subplots()
@@ -203,7 +205,7 @@ def plot_value_function(J_star, u_star, z, z_max, z_min, u0, file_name="", plot_
             extent=(z_min[4], z_max[4], z_max[y_limit_idx], z_min[y_limit_idx]))
     ax.invert_yaxis()
     fig.colorbar(im)
-    plt.savefig("quadrotor3d/figures/{}_policy_{}_u{}.png".format(file_name, plot_states, u_index+1))
+    plt.savefig("quadrotor3d/figures/{}/{}_policy_{}_u{}.png".format(actuator_saturate, file_name, plot_states, u_index+1))
 
 def quadrotor3d_constrained_lqr(nz=13, nu=4):
     quadrotor = QuadrotorTrigPlant()
@@ -253,7 +255,14 @@ def quadrotor3d_trig_constrained_lqr(nz=13, nu=4):
         Q, R, F=F.reshape(1, nz))
     return K, S
 
-def quadrotor3d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", visualize=False, test=False, actuator_saturate=False):
+def quadrotor3d_sos_upper_bound(deg, objective="integrate_ring", visualize=False, test=False, actuator_saturate=""):
+    """
+    actuator_saturate: type of actuator saturation
+    "clip": check piecewise HJB condition satisfaction: (-inf, u_min),[u_min, u_max], [u_max, inf)
+    "conservative": enforce u_star to be in [u_min, u_max]
+    "clip_conservative": piecewise HJB condition satisfaction: (-inf, u_min), [u_min, u_max] and enforce u_star to
+    be in (-inf, u_max].
+    """
     nz = 13
     nu = 4
     
@@ -332,16 +341,17 @@ def quadrotor3d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
         return f2_val
     
     # State limits (region of state space where we approximate the value function).
-    rpy_up = np.array([np.pi, 0.4 * np.pi, np.pi])
+    # rpy_up = np.array([np.pi, 0.4 * np.pi, np.pi])
+    rpy_up = np.array([np.pi/2, 0.2 * np.pi, np.pi/2])
     rpy_lo = -rpy_up
     rpys = np.linspace(rpy_lo, rpy_up)
     r = Rotation.from_euler("zyx", rpys)
     r = r.as_quat()
-    z_max = np.ones(nz)
+    z_max = np.ones(nz) * 0.5
     z_max[0] = 0
     xyzw_max = np.max(r, 0)
     z_max[1: 4] = xyzw_max[:3]
-    z_max[7:] = 2
+    # z_max[7:] = 2
     z_min = -z_max
     xyzw_min = np.min(r, 0)
     z_min[0] = xyzw_min[-1] - 1
@@ -452,133 +462,136 @@ def quadrotor3d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
         for i in np.arange(nz):
             lam = prog.NewSosPolynomial(Variables(z), lam_deg)[0].ToExpression()
             S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-        if not actuator_saturate:
+        if "clip" not in actuator_saturate:
             prog.AddSosConstraint(LHS + S_ring + S_Jdot)
     else:
         prog.AddSosConstraint(LHS + S_ring)
 
+    if "conservative" in actuator_saturate:
+        f2_val = f2(z)
+        dJdz = J_expr.Jacobian(z)
+        u_saturate = - .5 * Rinv.dot(f2_val.T).dot(dJdz.T)
+        lam_u_deg = Polynomial(u_saturate[0]).TotalDegree()-2
+        lam_u_deg = int(np.ceil(lam_u_deg/2)*2)
+        for k in range(nu):
+            for j in range(2):
+                lam_u_r = prog.NewFreePolynomial(Variables(z), lam_u_deg).ToExpression()
+                S_r_u = lam_u_r * (z[2]**2 + z[3]**2 - 1)
+                S_u = 0
+                for i in np.arange(nz):
+                    lam_u = prog.NewSosPolynomial(Variables(z), lam_u_deg)[0].ToExpression()
+                    S_u += lam_u*(z[i]-z_max[i])*(z[i]-z_min[i])
+                
+                if j==0:
+                    prog.AddSosConstraint(u_max[k] - u_saturate[k] + S_r_u + S_u)
+                else:
+                    if "clip" not in actuator_saturate:
+                        prog.AddSosConstraint(u_saturate[k] - u_min[k] + S_r_u + S_u)
+
     # Enforce that value function is PD
-    if deg >= 0:
-        S_J = 0
-        # Also constrain theta to be in [-pi/2, pi/2]
-        for i in np.arange(nz):
-            lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
-            S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-        prog.AddSosConstraint(J_expr + S_J)
-    else:
-        prog.AddSosConstraint(J_expr)
+    lam_r = prog.NewFreePolynomial(Variables(z), deg-2).ToExpression()
+    S_r = lam_r * (z[2]**2 + z[3]**2 - 1)
+    S_J = 0
+    # Also constrain theta to be in [-pi/2, pi/2]
+    for i in np.arange(nz):
+        lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
+        S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+    prog.AddSosConstraint(J_expr + S_J + S_r)
 
     # Enforce l(x,u)-a(x) is PD
     u = prog.NewIndeterminates(nu, 'u')
-    if deg >= 0:
-        S_la = 0
-        # Also constrain theta to be in [-pi/2, pi/2]
-        for i in np.arange(nz):
-            lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
-            S_la += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-        prog.AddSosConstraint(l_cost(z,u) - a.ToExpression() + S_la)
-    else:
-        prog.AddSosConstraint(l_cost(z,u) - a.ToExpression())
+    lam_r_la = prog.NewFreePolynomial(Variables(z), deg-2).ToExpression()
+    S_r_la = lam_r_la * (z[2]**2 + z[3]**2 - 1)
+    S_la = 0
+    # Also constrain theta to be in [-pi/2, pi/2]
+    for i in np.arange(nz):
+        lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
+        S_la += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+    prog.AddSosConstraint(l_cost(z,u) - a.ToExpression() + S_la + S_r_la)
+
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
     prog.AddLinearConstraint(J0 == 0)
 
     # Actuator saturation
-    if actuator_saturate:
+    # clip too memory consuming
+    if actuator_saturate == "conservative_clip":
         print("="*10, "Actuator saturation", "="*20)
         LHS_limits = []
         Su_limits = []
         S_ring_limits = []
         S_Jdot_limits = []   
-        for k in range(3): #(-inf, u_min),[u_min, u_max], (u_max, inf) 
-            print(k)
+        for k in range(2): #(-inf, u_min),[u_min, u_max]
+            print("u0", k)
             u_limit = np.zeros(nu, dtype=Expression)
             Su_limit = 0
             if k == 0:
                 u_limit[0] = u_min[0]
             elif k == 1:
                 u_limit[0] = u_fixed[0]
-            elif k == 2:
-                u_limit[0] = u_max[0]
-            for n in range(3):
+            for n in range(2):
+                print("u1", n)
                 if n == 0:
                     u_limit[1] = u_min[1]
                 elif n == 1:
                     u_limit[1] = u_fixed[1]
-                elif n == 2:
-                    u_limit[1] = u_max[1]
-                for h in range(3):
+                for h in range(2):
+                    print("u2", h)
                     if h == 0:
                         u_limit[2] = u_min[2]
                     elif h == 1:
                         u_limit[2] = u_fixed[2]
-                    elif h == 2:
-                        u_limit[2] = u_max[2]
-                    for l in range(3):
+                    for l in range(2):
+                        print("u3", l)
                         if l == 0:
                             u_limit[3] = u_min[3]
                         elif l == 1:
                             u_limit[3] = u_fixed[3]
-                        elif l == 2:
-                            u_limit[3] = u_max[3]
 
                         f_limit = f(z, u_limit)
                         J_dot_limit = J_expr.Jacobian(z).dot(f_limit)
                         LHS_limit = a.ToExpression() - J_dot_limit - l_cost(z, u_limit)
                         LHS_limits.append(LHS_limit)
 
-                        lam_u_deg = Polynomial(LHS_limit).TotalDegree() - np.max([Polynomial(u_limit[0]).TotalDegree(), Polynomial(u_limit[1]).TotalDegree()])
+                        lam_u_deg = Polynomial(LHS_limit).TotalDegree() - Polynomial(u_saturate[0]).TotalDegree()
                         if k == 0:
                             lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u*(u_fixed[0] - u_min[0])
+                            Su_limit += lam_u*(u_saturate[0] - u_min[0])
                         elif k == 1:
                             lam_u_min = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            lam_u_max = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u_max*(u_fixed[0] - u_max[0]) + lam_u_min*(u_min[0] - u_fixed[0])
-                        elif k == 2:
-                            lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u*(u_max[0] - u_fixed[0])
+                            Su_limit += lam_u_min*(u_min[0] - u_saturate[0])
 
+                        lam_u_deg = Polynomial(LHS_limit).TotalDegree() - Polynomial(u_saturate[1]).TotalDegree()
                         if n == 0:
                             lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u*(u_fixed[1] - u_min[1])
+                            Su_limit += lam_u*(u_saturate[1] - u_min[1])
                         elif n == 1:
                             lam_u_min = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            lam_u_max = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u_max*(u_fixed[1] - u_max[1]) + lam_u_min*(u_min[1] - u_fixed[1])
-                        elif n == 2:
-                            lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u*(u_max[1] - u_fixed[1])
+                            Su_limit += lam_u_min*(u_min[1] - u_saturate[1])
 
+                        lam_u_deg = Polynomial(LHS_limit).TotalDegree() - Polynomial(u_saturate[2]).TotalDegree()
                         if h == 0:
                             lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u*(u_fixed[2] - u_min[2])
+                            Su_limit += lam_u*(u_saturate[2] - u_min[2])
                         elif h == 1:
                             lam_u_min = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            lam_u_max = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u_max*(u_fixed[2] - u_max[2]) + lam_u_min*(u_min[2] - u_fixed[2])
-                        elif h == 2:
-                            lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u*(u_max[2] - u_fixed[2])
+                            Su_limit += lam_u_min*(u_min[2] - u_saturate[2])
 
+                        lam_u_deg = Polynomial(LHS_limit).TotalDegree() - Polynomial(u_saturate[3]).TotalDegree()
                         if l == 0:
                             lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u*(u_fixed[3] - u_min[3])
+                            Su_limit += lam_u*(u_saturate[3] - u_min[3])
                         elif l == 1:
                             lam_u_min = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            lam_u_max = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u_max*(u_fixed[3] - u_max[3]) + lam_u_min*(u_min[3] - u_fixed[3])
-                        elif l == 2:
-                            lam_u = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_u_deg/2)*2))[0].ToExpression()
-                            Su_limit += lam_u*(u_max[3] - u_fixed[3])
+                            Su_limit += lam_u_min*(u_min[3] - u_saturate[3])
 
                         lam_limit_deg = Polynomial(LHS_limit).TotalDegree() - 2
                         lam = prog.NewFreePolynomial(Variables(z), lam_limit_deg).ToExpression()
                         S_ring_limit = lam * ((z[0]+1)**2 + z[1]**2 + z[2]**2 + z[3]**2 - 1)
                         S_Jdot_limit = 0
                         for i in np.arange(nz):
-                            lam = prog.NewSosPolynomial(Variables(z), lam_limit_deg)[0].ToExpression()
+                            lam = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_limit_deg/2)*2))[0].ToExpression()
                             S_Jdot_limit += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
 
                         Su_limits.append(Su_limit)
@@ -593,48 +606,52 @@ def quadrotor3d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
     result = Solve(prog)
     assert result.is_success()
     a_star = result.GetSolution(a).RemoveTermsWithSmallCoefficients(1e-6).ToExpression()
+    J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
-    if actuator_saturate:
+    if actuator_saturate == "clip":
         LHS_limits_a_star = [result.GetSolution(x) for x in LHS_limits]
 
-    prog.RemoveCost(a_cost)
+    try:
+        prog.RemoveCost(a_cost)
 
-    # Maximize volume beneath the value function.
-    if objective=="integrate_all":
-        obj = J
-        for i in range(nz):
-            obj = obj.Integrate(z[i], z_min[i], z_max[i])
-        prog.AddCost(-obj.ToExpression())
-    elif objective=="integrate_ring":
-        obj = J
-        for i in non_q_idx:
-            obj = obj.Integrate(z[i], z_min[i], z_max[i])
-        cost = 0
-        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
-            qw_deg = monomial.degree(z[0]) 
-            qx_deg = monomial.degree(z[1])
-            qy_deg = monomial.degree(z[2]) 
-            qz_deg = monomial.degree(z[3])
-            monomial_int = integrate_quaternion_monte_carlo(qw_deg, qx_deg, qy_deg, qz_deg)
-            cost += monomial_int * coeff
-        poly = Polynomial(cost)
-        cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
-        # Make the numerics better
-        cost = cost/np.max(np.abs(cost_coeff))
-        cost = Polynomial(cost).RemoveTermsWithSmallCoefficients(1e-6)
-        prog.AddLinearCost(cost.ToExpression())
+        # Maximize volume beneath the value function.
+        if objective=="integrate_all":
+            obj = J
+            for i in range(nz):
+                obj = obj.Integrate(z[i], z_min[i], z_max[i])
+            prog.AddCost(-obj.ToExpression())
+        elif objective=="integrate_ring":
+            obj = J
+            for i in non_q_idx:
+                obj = obj.Integrate(z[i], z_min[i], z_max[i])
+            cost = 0
+            for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+                qw_deg = monomial.degree(z[0]) 
+                qx_deg = monomial.degree(z[1])
+                qy_deg = monomial.degree(z[2]) 
+                qz_deg = monomial.degree(z[3])
+                monomial_int = integrate_quaternion_monte_carlo(qw_deg, qx_deg, qy_deg, qz_deg)
+                cost += monomial_int * coeff
+            poly = Polynomial(cost)
+            cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
+            # Make the numerics better
+            cost = cost/np.max(np.abs(cost_coeff))
+            cost = Polynomial(cost).RemoveTermsWithSmallCoefficients(1e-6)
+            prog.AddLinearCost(cost.ToExpression())
 
-    # Enforce Bellman inequality.
-    if actuator_saturate:
-        for i in range(len(Su_limits)):
-                prog.AddSosConstraint(LHS_limits_a_star[i] + S_ring_limits[i] + S_Jdot_limits[i] + Su_limits[i])
-    else:
-        prog.AddSosConstraint(a_star - J_dot - l_cost(z, u_fixed) + S_ring + S_Jdot)
+        # Enforce Bellman inequality.
+        if actuator_saturate == "clip":
+            for i in range(len(Su_limits)):
+                    prog.AddSosConstraint(LHS_limits_a_star[i] + S_ring_limits[i] + S_Jdot_limits[i] + Su_limits[i])
+        else:
+            prog.AddSosConstraint(a_star - J_dot - l_cost(z, u_fixed) + S_ring + S_Jdot)
 
-    result = Solve(prog)
-    assert result.is_success()
-    J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
-    l_val = Polynomial(result.GetSolution(l_cost(z, u_fixed)))
+        result = Solve(prog)
+        assert result.is_success()
+        J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
+        l_val = Polynomial(result.GetSolution(l_cost(z, u_fixed)))
+    except:
+        pass
 
     f2_val = f2(z)
     dJdz = J_star.ToExpression().Jacobian(z)
@@ -646,9 +663,10 @@ def quadrotor3d_sos_upper_bound(deg, deg_lower=0, objective="integrate_ring", vi
 
 if __name__ == '__main__':
     deg = 2
-    J_star, z, z_max = quadrotor3d_sos_upper_bound(deg, objective="integrate_ring",visualize=True, actuator_saturate=True)
+    actuator_saturate = "conservative"
+    J_star, z, z_max = quadrotor3d_sos_upper_bound(deg, objective="integrate_ring",visualize=True, actuator_saturate=actuator_saturate)
 
     C = extract_polynomial_coeff_dict(J_star, z)
-    f = open("quadrotor3d/data/J_upper_bound_deg_{}.pkl".format(deg),"wb")
+    f = open("quadrotor3d/data/{}/J_upper_bound_deg_{}.pkl".format(actuator_saturate, deg),"wb")
     pickle.dump(C, f)
     f.close()
