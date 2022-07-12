@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.integrate import quad
-import matplotlib.pyplot as plt
+from utils import load_polynomial, save_polynomial
 from pydrake.examples.pendulum import (PendulumParams, PendulumPlant, PendulumInput)
 from pydrake.all import (MathematicalProgram, Variables, Solve, Polynomial, SolverOptions, CommonSolverOption, Linearize, LinearQuadraticRegulator)
 from polynomial_integration_fvi import plot_value_function_sos
@@ -8,7 +8,7 @@ from polynomial_integration_fvi import plot_value_function_sos
 # Given the degree for the approximate value function and the polynomials
 # in the S procedure, solves the SOS and returns the approximate value function
 # (together with the objective of the SOS program).
-def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False):
+def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False, test=False):
     # System dimensions. Here:
     # x = [theta, theta_dot]
     # z = [sin(theta), cos(theta), theta_dot]
@@ -44,8 +44,14 @@ def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False):
     # Quadratic running cost in augmented state.
     Q = np.diag([1, 1, 1]) * 10
     R = np.diag([1])
+    Rinv = np.linalg.inv(R)
     def l(z, u):
         return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
+
+    f2 = np.array([[0], [0], [1 / inertia]])
+
+    if test:
+        return nz, f, f2, Rinv, z0, l
 
     # Set up optimization.
     prog = MathematicalProgram()
@@ -76,10 +82,10 @@ def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False):
     # S procedure for s^2 + c^2 = 1.
     lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
     S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
-    lam_1 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
-    lam_2 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_2 = lam_2 * (z[2]**2 - 4*np.pi**2)
+    lam_2_Jdot = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_1 = lam_2_Jdot * (z[2]**2 - 4*np.pi**2)
+    lam_2_J = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_procedure_2 = lam_2_J * (z[2]**2 - 4*np.pi**2)
 
     # Enforce Bellman inequality.
     J_dot = J_expr.Jacobian(z).dot(f(z, u))
@@ -107,11 +113,10 @@ def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False):
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
     # Solve for the optimal feedback in augmented coordinates.
-    Rinv = np.linalg.inv(R)
-    f2 = np.array([[0], [0], [1 / inertia]])
     dJdz = J_star.ToExpression().Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
 
+    # save_polynomial(J_star, z, "pendulum_swingup/data/J_lower_deg_{}.pkl".format(deg))
     if visualize:
         plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_{}".format(objective))
     return J_star, u_star, z
@@ -513,6 +518,65 @@ def pendulum_sos_control_affine_dp(deg):
     plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, directory="sos")
     return J_star, u_star, z
 
+def pendulum_lower_bound_roa():
+    nz, f, f2, Rinv, z0, l = pendulum_sos_lower_bound(2, test=True)
+    prog = MathematicalProgram()
+    z = prog.NewIndeterminates(nz, "z")
+    V = load_polynomial(z, "pendulum_swingup/data/J_upper_deg_2.pkl")
+    dVdz = V.Jacobian(z)
+    u_star = - .5 * Rinv.dot(f2.T).dot(dVdz.T)
+    f_val = f(z, u_star)
+    V_dot = dVdz.dot(f_val)
+
+    lhs_deg = 4
+    lam_deg = lhs_deg - Polynomial(V_dot).TotalDegree()
+    lam = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    lam_r_deg = lhs_deg - 2
+    lam_r_01 = prog.NewFreePolynomial(Variables(z), lam_r_deg).ToExpression()
+
+    rho = prog.NewContinuousVariables(1, 'rho')[0]
+
+    z_squared = pow((z-z0).dot(z-z0), 1)
+    prog.AddSosConstraint(z_squared*(V - rho) - lam*V_dot + lam_r_01 * (z[0]**2 + z[1]**2 - 1))
+    prog.AddLinearCost(-rho)
+    # prog.AddLinearConstraint(rho<=33)
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    assert result.is_success()
+
+    rho_star = result.GetSolution(rho)
+    print("rho: ", rho_star)
+    return rho_star
+
+def verify_hjb_inequality_on_roa(rho=84):
+    nz, f, f2, Rinv, z0, l = pendulum_sos_lower_bound(2, test=True)
+    prog = MathematicalProgram()
+    z = prog.NewIndeterminates(nz, "z")
+    J = load_polynomial(z, "pendulum_swingup/data/J_upper_deg_2.pkl")
+    dJdz = J.Jacobian(z)
+    u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
+    f_val = f(z, u_star)
+    J_dot = dJdz.dot(f_val)
+
+    LHS = -J_dot
+    # LHS = -(J_dot + l(z, u_star))
+    lhs_deg = Polynomial(LHS).TotalDegree() + 4
+    lam_deg = lhs_deg - 2
+    lam_r_01 = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    lam_rho = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()
+    prog.AddSosConstraint(LHS + lam_r_01 * (z[0]**2 + z[1]**2 - 1) + lam_rho*(J-rho))
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    assert result.is_success()
 
 if __name__ == '__main__':
+    # pendulum_lower_bound_roa()
+    # verify_hjb_inequality_on_roa()
+    # J_star, u_star, z = pendulum_sos_lower_bound(2, "integrate_ring", visualize=True)
     J_star, u_star, z = pendulum_sos_upper_bound_relaxed(2, 2, "integrate_ring", visualize=True)
