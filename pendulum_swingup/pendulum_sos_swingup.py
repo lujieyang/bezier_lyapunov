@@ -116,7 +116,7 @@ def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False, t
     dJdz = J_star.ToExpression().Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
 
-    # save_polynomial(J_star, z, "pendulum_swingup/data/J_lower_deg_{}.pkl".format(deg))
+    save_polynomial(J_star, z, "pendulum_swingup/data/J_lower_l-a_deg_{}.pkl".format(deg))
     if visualize:
         plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_{}".format(objective))
     return J_star, u_star, z
@@ -309,18 +309,18 @@ def pendulum_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
     J_lower, u_fixed, z = pendulum_sos_lower_bound(deg_lower)
 
     # Check if u_fixed is stabilizing
-    dJdz = J_lower.ToExpression().Jacobian(z)
-    xdot = f(z, u_fixed)
-    Jdot = dJdz.dot(xdot)
-    prog0 = MathematicalProgram()
-    prog0.AddIndeterminates(z)
-    lam = prog0.NewFreePolynomial(Variables(z), deg).ToExpression()
-    S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
-    lam_1 = prog0.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
-    prog0.AddSosConstraint(-Jdot + S_procedure + S_procedure_1)
-    result0 = Solve(prog0)
-    assert result0.is_success()
+    # dJdz = J_lower.ToExpression().Jacobian(z)
+    # xdot = f(z, u_fixed)
+    # Jdot = dJdz.dot(xdot)
+    # prog0 = MathematicalProgram()
+    # prog0.AddIndeterminates(z)
+    # lam = prog0.NewFreePolynomial(Variables(z), deg).ToExpression()
+    # S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
+    # lam_1 = prog0.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    # S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
+    # prog0.AddSosConstraint(-Jdot + S_procedure + S_procedure_1)
+    # result0 = Solve(prog0)
+    # assert result0.is_success()
 
     # Set up optimization.        
     prog = MathematicalProgram()
@@ -368,8 +368,11 @@ def pendulum_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
     prog.AddLinearConstraint(J0 == 0)
 
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
     result = Solve(prog)
-    assert result.is_success()
+    # assert result.is_success()
     a_star = result.GetSolution(a).RemoveTermsWithSmallCoefficients(1e-6).ToExpression()
 
     prog.RemoveCost(a_cost)
@@ -414,6 +417,7 @@ def pendulum_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
     dJdz = J_star.ToExpression().Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
 
+    save_polynomial(J_star, z, "pendulum_swingup/data/J_upper_{}_lower_deg_{}.pkl".format(deg, deg_lower))
     if visualize:
         plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_upper_bound_relaxed_{}".format(objective))
     return J_star, u_star, z
@@ -522,13 +526,13 @@ def pendulum_lower_bound_roa():
     nz, f, f2, Rinv, z0, l = pendulum_sos_lower_bound(2, test=True)
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz, "z")
-    V = load_polynomial(z, "pendulum_swingup/data/J_upper_deg_2.pkl")
+    V = load_polynomial(z, "pendulum_swingup/data/J_upper_6_lower_deg_2.pkl")
     dVdz = V.Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dVdz.T)
     f_val = f(z, u_star)
     V_dot = dVdz.dot(f_val)
 
-    lhs_deg = 4
+    lhs_deg = 2 + 6
     lam_deg = lhs_deg - Polynomial(V_dot).TotalDegree()
     lam = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
     lam_r_deg = lhs_deg - 2
@@ -551,11 +555,11 @@ def pendulum_lower_bound_roa():
     print("rho: ", rho_star)
     return rho_star
 
-def verify_hjb_inequality_on_roa(rho=84):
+def verify_hjb_inequality_on_roa(rho=70):
     nz, f, f2, Rinv, z0, l = pendulum_sos_lower_bound(2, test=True)
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz, "z")
-    J = load_polynomial(z, "pendulum_swingup/data/J_upper_deg_2.pkl")
+    J = load_polynomial(z, "pendulum_swingup/data/J_upper_6_lower_deg_2.pkl")
     dJdz = J.Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
     f_val = f(z, u_star)
@@ -578,5 +582,5 @@ def verify_hjb_inequality_on_roa(rho=84):
 if __name__ == '__main__':
     # pendulum_lower_bound_roa()
     # verify_hjb_inequality_on_roa()
-    # J_star, u_star, z = pendulum_sos_lower_bound(2, "integrate_ring", visualize=True)
-    J_star, u_star, z = pendulum_sos_upper_bound_relaxed(2, 2, "integrate_ring", visualize=True)
+    J_star, u_star, z = pendulum_sos_lower_bound(2, "integrate_ring", visualize=True)
+    # J_star, u_star, z = pendulum_sos_upper_bound_relaxed(6, 2, "integrate_ring", visualize=True)
