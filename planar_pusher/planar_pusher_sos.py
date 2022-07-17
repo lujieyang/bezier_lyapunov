@@ -1,15 +1,8 @@
 import numpy as np
-import os
-import math
-from scipy.spatial.transform import Rotation
 from scipy.integrate import quad
 from scipy import integrate
-import mcint
 from utils import save_polynomial, load_polynomial
-import pickle
-from pydrake.all import (MathematicalProgram, Variables, Expression, Solve, Polynomial, SolverOptions, CommonSolverOption, 
-LinearQuadraticRegulator, sin, cos, Linearize)
-from pydrake.examples.quadrotor_trig import (QuadrotorTrigPlant)
+from pydrake.all import (MathematicalProgram, Variables, Expression, Solve, Polynomial, SolverOptions, CommonSolverOption)
 
 import matplotlib.pyplot as plt
 from matplotlib import cm
@@ -32,9 +25,9 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
     fm = mu_g*m*g
     mm = integrate.dblquad(lambda y, x: np.sqrt(x**2+y**2), -px, px, lambda x: -px, lambda x: px)[0]/(2*px)**2 *mu_g * m * g
 
-    d_theta = np.pi/2
-    z_max = np.array([0.2, 0.2, np.sin(d_theta), np.cos(d_theta), px])
-    z_min = np.array([-0.2, -0.2, -np.sin(d_theta), 0, -px])
+    d_theta = np.pi/4
+    z_max = np.array([0.15, 0.15, np.sin(d_theta), 1, px])
+    z_min = np.array([-0.15, -0.15, -np.sin(d_theta), np.cos(d_theta), -px])
     assert (z_min<=z_max).all()
 
     x2z = lambda x : np.array([x[0], x[1], np.sin(x[2]), np.cos(x[2]), x[3]])
@@ -42,8 +35,8 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
     z0 = x2z(x0)
         
     # Quadratic running cost in augmented state.
-    Q = np.diag([100, 100, 100, 100, 0])
-    R = np.eye(nu)
+    Q = np.diag([100, 100, 150, 150, 0])
+    R = np.eye(nu)/100
     def l_cost(z, u):
         return (z - z0).dot(Q).dot(z - z0) + (u).dot(R).dot(u )
 
@@ -128,7 +121,8 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
     lam_a = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()
     lam_b = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()
     lam_c = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
-    S_complementarity = -lam_a*u[-1]*u[1] + lam_b*(u[1]**2 - mu_p**2*u[0]**2) + lam_c*(u[1]**2 - mu_p**2*u[0]**2)*u[-1] 
+    lam_d = 0 #prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()
+    S_complementarity = -lam_a*u[-1]*u[1] + lam_b*(u[1]**2 - mu_p**2*u[0]**2) + lam_c*(u[1]**2 - mu_p**2*u[0]**2)*u[-1] -lam_d * u[0] 
 
     S_Jdot = 0
     for i in np.arange(nz):
@@ -154,7 +148,7 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
 
     save_polynomial(J_star, z, 'planar_pusher/data/J_lower_deg_{}_{}.pkl'.format(deg, z_max))
     if visualize:
-        plot_value_function(J_star, z, z_max, x2z, file_name="lower_bound_constrained_lqr_{}_{}_{}".format(objective, deg, z_max), plot_states="xy")
+        plot_value_function(J_star, z, z_max, x2z, file_name="lower_bound_constrained_lqr_{}_{}_{}".format(objective, deg, z_max), plot_states="xtheta")
     return J_star, z
 
 def plot_value_function(J_star, z, z_max, x2z, file_name="", plot_states="xy"):
