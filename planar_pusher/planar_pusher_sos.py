@@ -19,7 +19,7 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
     x0 = np.zeros(4)
     px = 0.05
     mu_g = 0.35
-    mu_p = 0.3
+    mu_p = 0.2
     m = 1
     g = 9.81
     fm = mu_g*m*g
@@ -67,8 +67,19 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
         f_val[3] = u[-1]
         return f_val
     
+    def f2x(x, dtype=Expression):
+        assert len(x) == nx
+        s = np.sin(x[2])
+        c = np.cos(x[2])
+        f2_val = np.zeros([nx, nu], dtype=dtype)
+        f2_val[0] = np.array([c, -s, 0])/fm**2
+        f2_val[1] = np.array([s, c, 0])/fm**2
+        f2_val[2] = np.array([-x[-1], px, 0])/mm**2
+        f2_val[3] = np.array([0, 0, 1])
+        return f2_val
+    
     if test:
-        return nz, nu, f, fx, mu_p, px, l_cost, x2z
+        return nz, nu, f, fx, f2x, mu_p, px, l_cost, x2z
 
     non_q_idx = [0, 1, 4]
 
@@ -132,7 +143,7 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
 
     # Enforce that value function is PD
     lam_r = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
-    S_r = lam_r * ((z[0]+1)**2 + z[1]**2 + z[2]**2 + z[3]**2 - 1)
+    S_r = lam_r * (z[2]**2 + z[3]**2 - 1)
     S_J = 0
     for i in np.arange(nz):
         lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
@@ -146,9 +157,9 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
     assert result.is_success()
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
-    save_polynomial(J_star, z, 'planar_pusher/data/J_lower_deg_{}_{}.pkl'.format(deg, z_max))
+    save_polynomial(J_star, z, 'planar_pusher/data/J_lower_deg_{}.pkl'.format(deg))
     if visualize:
-        plot_value_function(J_star, z, z_max, x2z, file_name="lower_bound_constrained_lqr_{}_{}_{}".format(objective, deg, z_max), plot_states="xtheta")
+        plot_value_function(J_star, z, z_max, x2z, file_name="lower_bound_constrained_lqr_{}_{}".format(objective, deg), plot_states="xtheta")
     return J_star, z
 
 def plot_value_function(J_star, z, z_max, x2z, file_name="", plot_states="xy"):
@@ -178,11 +189,13 @@ def plot_value_function(J_star, z, z_max, x2z, file_name="", plot_states="xy"):
         z_val = Z[:, i]
         J[i] = J_star.Evaluate(dict(zip(z, z_val)))
 
-    fig = plt.figure(figsize=(9, 4))
+    fig = plt.figure()
     ax = fig.subplots()
-    ax.set_xlabel("x")
-    ax.set_ylabel(ylabel)
-    ax.set_title("Cost-to-Go")
+    plt.xticks(fontsize=12)
+    plt.yticks(fontsize=12)
+    # ax.set_xlabel("x")
+    # ax.set_ylabel(ylabel)
+    # ax.set_title("Cost-to-Go")
     im = ax.imshow(J.reshape(X1.shape),
             cmap=cm.jet, aspect='auto',
             extent=(x_min[0], x_max[0], x_max[y_idx], x_min[y_idx]))
