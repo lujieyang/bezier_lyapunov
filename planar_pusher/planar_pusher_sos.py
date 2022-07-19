@@ -213,7 +213,7 @@ def plot_value_function(J_star, z, z_max, x2z, file_name="", plot_states="xy", s
     fig.colorbar(im)
     plt.savefig("planar_pusher/figures/{}_{}.png".format(file_name, plot_states))
 
-def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="integrate_ring", visualize=False, test=False):
+def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="integrate_ring", eps=1e-3, visualize=False, test=False):
     """x = [x, y, theta, px, py]
     z = [x, y, s, c, px, py]
     u = [fn, ft, v_px, v_py]
@@ -246,7 +246,7 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
     def l_cost(z, u):
         return (z - z0).dot(Q).dot(z - z0) + (u).dot(R).dot(u)
     
-    Q_teleport = np.eye(2)
+    Q_teleport = np.eye(2)/100
     def l_teleport(z_pre, z_post):
         assert len(z_pre) == 2
         assert len(z_post) == 2
@@ -282,8 +282,8 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
                       [s, c, 0],
                       [0, 0, 1]])
         L = np.diag([1/fm**2, 1/fm**2, 1/mm**2])
-        J = np.array([[1, 0, -z[5]],
-                      [0, 1, z[4]]])
+        J = np.array([[1, 0, -x[-1]],
+                      [0, 1, x[-2]]])
         f_val[:3] = R@L@J.T@(n*u[0]+d*u[1])
         f_val[3] = u[2]
         f_val[4] = u[3]
@@ -298,7 +298,7 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
         return f2_val
     
     if test:
-        return nz, nu, f, fx, f2x, mu_p, px, l_cost, x2z
+        return nz, nu, f, fx, f2x, mu_p, px, l_cost, l_teleport, x2z
 
     non_q_idx = [0, 1, 4, 5]
 
@@ -358,35 +358,49 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
         v_px = u[2]
         v_py = u[3]
         if i<=1:
+            # On the left and right surface
             lam_a = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()
             lam_b = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()
             lam_c = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
-            lam_d = prog.NewFReePolynomial(Variables(z), lam_deg).ToExpression()
+            lam_d = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
             S_complementarity = -lam_a*v_py*ft + lam_b*(ft**2 - mu_p**2*fn**2) + lam_c*(ft**2 - mu_p**2*fn**2)*v_py -lam_d * v_px
+            int_idx = [0, 1, 2, 3, 5]
         else:
+            # On the top and bottom surface
             lam_a = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()
             lam_b = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()
             lam_c = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
             lam_d = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
             S_complementarity = -lam_a*v_px*ft + lam_b*(ft**2 - mu_p**2*fn**2) + lam_c*(ft**2 - mu_p**2*fn**2)*v_px -lam_d * v_py
+            int_idx = np.arange(5)
+
+        # Restrain px, py to be on the surface
+        lam_s = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+        S_s = lam_s * (n.dot(z[-2:])-1)
 
         S_Jdot = 0
-        for i in np.arange(nz):
+        for i in int_idx:
             lam = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()
             S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-        prog.AddSosConstraint(LHS + S_ring + S_Jdot + S_complementarity)
+        prog.AddSosConstraint(LHS + S_ring + S_Jdot + S_complementarity + S_s)
     
-    # Teleportation
-    z_post = prog.NewIndeterminates(2, 'z_post')
-    J_post = J_expr.Substitute(dict(zip(z[4:], z_post)))
-    S_teleport = 0
-    for i in np.arange(nz):
-        lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
-        S_teleport += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-    for i in np.arange(2):
-        lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
-        S_teleport += lam*(z_post[i]-z_max[i+4])*(z_post[i]-z_min[i+4])
-    prog.AddSosConstraint(l_teleport(z[4:], z_post) + J_post - J_expr)
+        # Teleportation
+        z_post = prog.NewIndeterminates(2, 'z_post')
+        J_post = J_expr.Substitute(dict(zip(z[4:], z_post)))
+        S_teleport = 0
+        for i in int_idx:
+            lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
+            S_teleport += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        for i in np.arange(2):
+            lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
+            S_teleport += lam*(z_post[i]-z_max[i+4])*(z_post[i]-z_min[i+4])
+        # Restrain z_post to be on a different surface from z
+        lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+        S_teleport += lam*(eps-px-n.dot(np.array([z_post[0], z_post[1]])))
+        # Restrain z_post to be on the surface
+        lam_s = prog.NewFreePolynomial(Variables(z), deg-2).ToExpression()
+        S_s = (z_post[0]-px)*(z_post[0]+px)*(z_post[1]-px)*(z_post[1]+px)
+        prog.AddSosConstraint(l_teleport(z[4:], z_post) + J_post - J_expr) # + S_teleport + S_s
 
     # Enforce that value function is PD
     lam_r = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
@@ -404,9 +418,9 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
     assert result.is_success()
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
-    save_polynomial(J_star, z, 'planar_pusher/data/four_modes/J_lower_deg_{}.pkl'.format(deg))
+    save_polynomial(J_star, z, 'planar_pusher/data/four_modes/J_lower_deg_{}_more_s.pkl'.format(deg))
     if visualize:
-        plot_value_function(J_star, z, z_max, x2z, file_name="four_modes/lower_bound_constrained_lqr_{}_{}".format(objective, deg), plot_states="xtheta")
+        plot_value_function(J_star, z, z_max, x2z, file_name="four_modes/lower_bound_constrained_lqr_{}_{}".format(objective, deg), plot_states="xtheta", switch_contact=True)
     return J_star, z
 
 if __name__ == '__main__':
