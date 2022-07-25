@@ -22,10 +22,10 @@ def simulate(J_star, dJdz, z_var, x0, T=5, dt=0.01, initial_guess=False):
         for i in range(nz):
             dJdz_val[i] = dJdz[i].Evaluate(dict(zip(z_var, z)))
         if initial_guess and n < N - 1:
-            u_guess = calc_u_initial_guess(x, N-n, dt)
+            u_guess = calc_u_initial_guess(x, normal, tangential, N-n, dt)
         else:
             u_guess = None
-        u_star, teleport = calc_optimal_conrol(J_star, z, z_var, dJdz_val, normal, tangential,u_guess=u_guess)
+        u_star, teleport = calc_optimal_conrol(J_star, z, z_var, dJdz_val, normal, tangential, dt, u_guess=u_guess)
         if teleport:
             x = np.copy(x)
             x[-2:] = u_star
@@ -37,19 +37,23 @@ def simulate(J_star, dJdz, z_var, x0, T=5, dt=0.01, initial_guess=False):
         traj.append(x)
     return np.array(traj), np.array(u_traj)
 
-def calc_u_initial_guess(x, H, dt):
-    x_guess = np.linspace(x, np.zeros(4), H)
+def calc_u_initial_guess(x, n, d, H, dt):
+    x0 = np.zeros(5)
+    x0[-2:] = x[-2:]
+    x_guess = np.linspace(x, x0, H)
     x_dot = (x_guess[1] - x)/dt
-    f2_val = f2x(x, float)
+    f2_val = f2x(x, n, d, float)
     u_guess =  np.linalg.lstsq(f2_val, x_dot)[0]
     for i in range(nu):
         u_guess[i] = np.clip(u_guess[i], u_min[i], u_max[i])
     return u_guess
 
-def calc_optimal_conrol(J, z, z_var, dJdz_val, n, d, u_guess=None):
-    u_star, nlp_cost = calc_optimal_conrol_nlp(z, dJdz_val, n, d, u_guess)
-    z_post_star, teleport_cost = calc_teleport_miqp(z, z_var, J, n)
-    if nlp_cost <= teleport_cost:
+def calc_optimal_conrol(J, z, z_var, dJdz_val, n, d, dt, u_guess=None):
+    u_star, Jdot = calc_optimal_conrol_nlp(z, dJdz_val, n, d, u_guess)
+    J_pre = J.Evaluate(dict(zip(z_var, z)))
+    J_continuous = J_pre + Jdot * dt
+    z_post_star, J_post = calc_teleport_miqp(z, z_var, J, n)
+    if J_continuous <= J_post:
         return u_star, False
     else:
         return z_post_star, True
@@ -58,13 +62,12 @@ def calc_teleport_miqp(z, z_var, J, n, eps=1e-3, M=1):
     prog = MathematicalProgram()
     z_post = prog.NewContinuousVariables(2, 'z_post')
     b = prog.NewBinaryVariables(4)  # Can be reduced to 3 given n
-    J_pre = J.Evaluate(dict(zip(z_var, z)))
     J_post = J.EvaluatePartial(dict(zip(z_var[:4], z[:4])))
     J_post = J_post.Substitute(dict(zip(z_var[4:], z_post)))
     l_teleport_val = l_teleport(z[4:], z_post)
-    prog.AddCost(l_teleport_val + J_post - J_pre)
+    prog.AddCost(l_teleport_val + J_post)
     prog.AddBoundingBoxConstraint(-px*np.ones(2), px*np.ones(2), z_post)
-    prog.AddConstraint(n.dot(z_post) >= eps-px)
+    prog.AddConstraint(n.dot(z_post) >= 0)
     prog.AddLinearConstraint(np.sum(b) == 1)
     # On left surface
     prog.AddConstraint(z_post[0]+px >= -(1-b[0]*M))
@@ -75,61 +78,63 @@ def calc_teleport_miqp(z, z_var, J, n, eps=1e-3, M=1):
     # On bottom surface
     prog.AddConstraint(z_post[1]+px >= -(1-b[2]*M))
     prog.AddConstraint(z_post[1]+px <= (1-b[2]*M))   
-    # On bottom surface
+    # On top surface
     prog.AddConstraint(z_post[1]-px >= -(1-b[3]*M))
     prog.AddConstraint(z_post[1]-px <= (1-b[3]*M))   
 
-    options = SolverOptions()
-    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
-    prog.SetSolverOptions(options)
+    # options = SolverOptions()
+    # options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    # prog.SetSolverOptions(options)
     result = Solve(prog)
     assert result.is_success()
 
     z_post_star = result.GetSolution(z_post)
-    teleport_cost = result.get_optimal_cost()
+    J_post_star = result.GetSolution(J_post).Evaluate()
 
-    return z_post_star, teleport_cost
+    return z_post_star, J_post_star
 
 
 def calc_teleport_nlp(z, z_var, J, n, eps=1e-3):
-    if z[1] > 0:
+    if np.array_equal(n, np.array([0, 1])):
         # Above
         z_post_guesses = [np.array([0, px]), np.array([px, 0]), np.array([-px, 0])]
-    elif z[1] < 0:
+    elif np.array_equal(n, np.array([0, -1])):
         # Below
         z_post_guesses = [np.array([0, -px]), np.array([px, 0]), np.array([-px, 0])]
-    elif z[0] > 0:
+    elif np.array_equal(n, np.array([1, 0])):
         # Right
         z_post_guesses = [np.array([px, 0]), np.array([0, px]), np.array([0, -px])]
-    elif z[0] < 0:
+    elif np.array_equal(n, np.array([-1, 0])):
         # Left
         z_post_guesses = [np.array([-px, 0]), np.array([0, px]), np.array([0, -px])]  
+    teleport_cost_best = np.inf
     for z_post_guess in z_post_guesses:
-        try:
-            prog = MathematicalProgram()
-            z_post = prog.NewContinuousVariables(2, 'z_post')
-            J_pre = J.Evaluate(dict(zip(z_var, z)))
-            J_post = J.EvaluatePartial(dict(zip(z_var[:4], z[:4])))
-            J_post = J_post.Substitute(dict(zip(z_var[4:], z_post)))
-            l_teleport_val = l_teleport(z[4:], z_post)
-            prog.AddCost(l_teleport_val + J_post - J_pre)
-            prog.AddBoundingBoxConstraint(-px*np.ones(2), px*np.ones(2), z_post)
-            prog.AddConstraint(n.dot(z_post) >= eps-px)
-            prog.AddConstraint((z_post[0]-px)*(z_post[0]+px)*(z_post[1]-px)*(z_post[1]+px)==0)
-            prog.SetInitialGuess(z_post, z_post_guess)
+        prog = MathematicalProgram()
+        z_post = prog.NewContinuousVariables(2, 'z_post')
+        J_pre = J.Evaluate(dict(zip(z_var, z)))
+        J_post = J.EvaluatePartial(dict(zip(z_var[:4], z[:4])))
+        J_post = J_post.Substitute(dict(zip(z_var[4:], z_post)))
+        l_teleport_val = l_teleport(z[4:], z_post)
+        prog.AddCost(l_teleport_val + J_post - J_pre)
+        prog.AddBoundingBoxConstraint(-px*np.ones(2), px*np.ones(2), z_post)
+        prog.AddConstraint(n.dot(z_post) >= eps-px)
+        prog.AddConstraint((z_post[0]-px)*(z_post[0]+px)*(z_post[1]-px)*(z_post[1]+px) * 1e5==0)
+        prog.SetInitialGuess(z_post, z_post_guess)
 
-            options = SolverOptions()
-            options.SetOption(CommonSolverOption.kPrintToConsole, 1)
-            prog.SetSolverOptions(options)
-            result = Solve(prog)
-            assert result.is_success()
+        options = SolverOptions()
+        options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+        prog.SetSolverOptions(options)
+        result = Solve(prog)
+        assert result.is_success()
 
-            z_post_star = result.GetSolution(z_post)
-            teleport_cost = result.get_optimal_cost()
+        z_post_star = result.GetSolution(z_post)
+        teleport_cost = result.get_optimal_cost()
 
-            return z_post_star, teleport_cost
-        except:
-            pass
+        if teleport_cost < teleport_cost_best:
+            teleport_cost_best = teleport_cost
+            z_post_star_best = z_post_star
+
+        return z_post_star_best, teleport_cost_best
 
 def calc_optimal_conrol_nlp(z, dJdz_val, n, d, u_guess=None):
     prog = MathematicalProgram()
@@ -139,12 +144,13 @@ def calc_optimal_conrol_nlp(z, dJdz_val, n, d, u_guess=None):
         prog.AddConstraint(u[-2] == 0)
     elif n[0] == 0:
         prog.AddConstraint(u[-1] == 0)
-    prog.AddConstraint(u[0] >= 0)
-    prog.AddConstraint(u[-1]*u[1] >=0)
-    prog.AddConstraint(u[-2]*u[1] >=0)
-    prog.AddConstraint(mu_p**2*u[0]**2 - u[1]**2>= 0)
-    prog.AddConstraint((mu_p**2*u[0]**2 - u[1]**2)*u[-1] == 0)
-    prog.AddConstraint((mu_p**2*u[0]**2 - u[1]**2)*u[-2] == 0)
+    # Scaling for better numerics: length << 1
+    prog.AddConstraint(u[0]*1e5 >= 0)
+    prog.AddConstraint(u[-1]*u[1]*1e5 >=0)
+    prog.AddConstraint(u[-2]*u[1]*1e5 >=0)
+    prog.AddConstraint((mu_p**2*u[0]**2 - u[1]**2)*1e5>= 0)
+    prog.AddConstraint((mu_p**2*u[0]**2 - u[1]**2)*u[-1]*1e5 == 0)
+    prog.AddConstraint((mu_p**2*u[0]**2 - u[1]**2)*u[-2]*1e5 == 0)
     # prog.AddBoundingBoxConstraint(u_min, u_max, u)
     if u_guess is not None:
         prog.SetInitialGuess(u, u_guess)
@@ -153,13 +159,14 @@ def calc_optimal_conrol_nlp(z, dJdz_val, n, d, u_guess=None):
     options.SetOption(CommonSolverOption.kPrintToConsole, 1)
     prog.SetSolverOptions(options)
     result = Solve(prog)
-    assert result.is_success()
+    # assert result.is_success()
 
     u_star = result.GetSolution(u)
 
     for i in range(nu):
         u_star[i] = np.clip(u_star[i], u_min[i], u_max[i])
 
+    # return u_star, dJdz_val.dot(f(z, u_star, n, d, float))
     return u_star, result.get_optimal_cost()
 
 def calc_normal(x):
@@ -213,23 +220,22 @@ def plot_traj(traj, deg):
             ax.add_artist(drawing_colored_circle)
 
     draw_box(traj[0], w_pusher=True, object_color="green", pusher_color="green")     
-    for n in range(10, 30, 10):
+    for n in range(10, 20, 10):
         draw_box(traj[n], w_pusher=True)
-    for n in range(30, traj.shape[0], 40):
+    for n in range(30, traj.shape[0], 35):
         draw_box(traj[n], w_pusher=True)
     ax.add_patch(Rectangle((-px, -px), 2*px, 2*px, 0, edgecolor='deeppink', linestyle="--", linewidth=2, facecolor='none', antialiased="True"))
-    plt.xlim([-0.2, 0.2])
-    plt.ylim([-0.2, 0.4])
-    plt.savefig("planar_pusher/figures/trajectory/four_modes/trajectory_{}_mu_{}.png".format(deg, mu_p))
+    plt.xlim([-0.4, 0.2])
+    plt.ylim([-0.4, 0.4])
+    plt.savefig("planar_pusher/figures/trajectory/four_modes/trajectory_{}.png".format(deg, mu_p))
 
 if __name__ == '__main__':
     deg = 2
+    Q_teleport_scale = 1
     z_var = MakeVectorVariable(nz, "z")
-    d_theta = np.pi/4
-    z_max = np.array([0.15, 0.15, np.sin(d_theta), 1, px])
-    J_star = load_polynomial(z_var, "planar_pusher/data/four_modes/J_lower_deg_{}.pkl".format(deg))
+    J_star = load_polynomial(z_var, "planar_pusher/data/four_modes/{}/J_lower_deg_2_100.pkl".format(Q_teleport_scale))
     dJdz = J_star.Jacobian(z_var)
 
-    x0 = np.array([0, 0.22, 0, 0, -px])
-    traj, u_traj = simulate(J_star, dJdz, z_var, x0, T=10,  initial_guess=False)
+    x0 = np.array([0, 0.28, 0, 0, -px])
+    traj, u_traj = simulate(J_star, dJdz, z_var, x0, T=10,  initial_guess=True)
     plot_traj(traj, deg)
