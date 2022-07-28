@@ -1,5 +1,5 @@
 import numpy as np
-from pydrake.all import (MathematicalProgram)
+import pickle
 
 def monomial(x, n):
     return x**n
@@ -85,6 +85,18 @@ def construct_monomial_basis_from_polynomial(J, nJ, z):
         return b
     
     return calc_basis
+
+def save_polynomial(p, z, file_name):
+    C = extract_polynomial_coeff_dict(p, z)
+    f = open(file_name, "wb")
+    pickle.dump(C, f)
+    f.close()
+
+def load_polynomial(z, file_name):
+    with open(file_name, "rb") as input_file:
+        C = pickle.load(input_file)
+    p = reconstruct_polynomial_from_dict(C, z)
+    return p
 
 def matrix_adjoint(M):
     if len(M) == 2:
