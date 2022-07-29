@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from scipy.integrate import quad
 from scipy import integrate
 from utils import save_polynomial, load_polynomial
@@ -150,7 +151,7 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
     S_r = lam_r * (z[2]**2 + z[3]**2 - 1)
     S_J = 0
     for i in np.arange(nz):
-        lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
+        lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
         S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
     prog.AddSosConstraint(J_expr + S_J + S_r)
 
@@ -161,9 +162,9 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
     assert result.is_success()
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
-    save_polynomial(J_star, z, 'planar_pusher/data/J_lower_deg_{}.pkl'.format(deg))
+    save_polynomial(J_star, z, 'planar_pusher/data/correct_dynamics/J_lower_deg_{}_mup_{}.pkl'.format(deg, mu_p))
     if visualize:
-        plot_value_function(J_star, z, z_max, x2z, file_name="lower_bound_constrained_lqr_{}_{}".format(objective, deg), plot_states="xtheta")
+        plot_value_function(J_star, z, z_max, x2z, file_name="correct_dynamics/lower_bound_constrained_lqr_{}_{}".format(objective, deg), plot_states="xtheta")
     return J_star, z
 
 def plot_value_function(J_star, z, z_max, x2z, file_name="", plot_states="xy", switch_contact=False):
@@ -192,6 +193,11 @@ def plot_value_function(J_star, z, z_max, x2z, file_name="", plot_states="xy", s
         else:
             X = np.vstack((X1.flatten(), Y.flatten(), zero_vector, zero_vector))
         ylabel="y"
+    elif plot_states == "xpx":
+        y_idx = -1
+        X1, PX = np.meshgrid(np.linspace(x_min[0], x_max[0], 51),
+                np.linspace(x_min[-1], x_max[-1], 51))
+        X = np.vstack((X1.flatten(), zero_vector, zero_vector, PX.flatten(), zero_vector))        
 
     Z = x2z(X)
     J = np.zeros(Z.shape[1])
@@ -241,12 +247,13 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
     z0 = x2z(x0)
         
     # Quadratic running cost in augmented state.
-    Q = np.diag([100, 100, 150, 150, 0, 0])
+    Q = np.diag([100, 100, 150, 150, 0, 0]) * 100
     R = np.eye(nu)/100
     def l_cost(z, u):
         return (z - z0).dot(Q).dot(z - z0) + (u).dot(R).dot(u)
     
-    Q_teleport = np.eye(2)/100
+    Q_teleport_scale = 1
+    Q_teleport = np.eye(2) * Q_teleport_scale
     def l_teleport(z_pre, z_post):
         assert len(z_pre) == 2
         assert len(z_post) == 2
@@ -289,12 +296,14 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
         f_val[4] = u[3]
         return f_val
     
-    def f2x(x, dtype=Expression):
+    def f2x(x, n, d, dtype=Expression):
         assert len(x) == nx
-        s = np.sin(x[2])
-        c = np.cos(x[2])
         f2_val = np.zeros([nx, nu], dtype=dtype)
-
+        f1_val = fx(x, np.zeros(nu), n, d)
+        for i in range(nu):
+            ue = np.zeros(nu)
+            ue[i] = 1
+            f2_val[:, i] = fx(x, ue, n, d) - f1_val
         return f2_val
     
     if test:
@@ -376,7 +385,7 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
 
         # Restrain px, py to be on the surface
         lam_s = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
-        S_s = lam_s * (n.dot(z[-2:])-1)
+        S_s = lam_s * (n.dot(z[-2:]) + px)
 
         S_Jdot = 0
         for i in int_idx:
@@ -396,11 +405,13 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
             S_teleport += lam*(z_post[i]-z_max[i+4])*(z_post[i]-z_min[i+4])
         # Restrain z_post to be on a different surface from z
         lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-        S_teleport += lam*(eps-px-n.dot(np.array([z_post[0], z_post[1]])))
+        S_teleport += lam*(-n.dot(np.array([z_post[0], z_post[1]])))  # n.dot(p) >=0
         # Restrain z_post to be on the surface
         lam_s = prog.NewFreePolynomial(Variables(z), deg-2).ToExpression()
         S_s = (z_post[0]-px)*(z_post[0]+px)*(z_post[1]-px)*(z_post[1]+px)
-        prog.AddSosConstraint(l_teleport(z[4:], z_post) + J_post - J_expr) # + S_teleport + S_s
+        lam_r = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+        S_r = lam_r * (z[2]**2 + z[3]**2 - 1)
+        prog.AddSosConstraint(l_teleport(z[4:], z_post) + J_post - J_expr + S_teleport + S_s + S_r)
 
     # Enforce that value function is PD
     lam_r = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
@@ -418,9 +429,12 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
     assert result.is_success()
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
-    save_polynomial(J_star, z, 'planar_pusher/data/four_modes/J_lower_deg_{}_more_s.pkl'.format(deg))
+    os.makedirs("planar_pusher/data/four_modes/{}".format(Q_teleport_scale), exist_ok=True)
+    os.makedirs("planar_pusher/figures/four_modes/{}".format(Q_teleport_scale), exist_ok=True)
+
+    save_polynomial(J_star, z, 'planar_pusher/data/four_modes/{}/J_lower_deg_{}_100.pkl'.format(Q_teleport_scale, deg))
     if visualize:
-        plot_value_function(J_star, z, z_max, x2z, file_name="four_modes/lower_bound_constrained_lqr_{}_{}".format(objective, deg), plot_states="xtheta", switch_contact=True)
+        plot_value_function(J_star, z, z_max, x2z, file_name="four_modes/{}/lower_bound_constrained_lqr_{}_{}_100".format(Q_teleport_scale, objective, deg), plot_states="xtheta", switch_contact=True)
     return J_star, z
 
 if __name__ == '__main__':
