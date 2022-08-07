@@ -86,6 +86,14 @@ def construct_monomial_basis_from_polynomial(J, nJ, z):
     
     return calc_basis
 
+def construct_polynomial_from_coeff(J, J_coeff):
+    poly = 0
+    for m, coeff in J.monomial_to_coefficient_map().items():
+        s = coeff.GetVariables().to_string()
+        idx = int(s[s.find('(')+1:s.find(')')])
+        poly += m*J_coeff[idx]
+    return poly
+
 def save_polynomial(p, z, file_name):
     C = extract_polynomial_coeff_dict(p, z)
     f = open(file_name, "wb")
