@@ -1,4 +1,5 @@
 import numpy as np
+from sklearn.linear_model import Lasso, Ridge
 import os
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -113,14 +114,14 @@ def simulate_traj_opt(u, z_var, x0, T=5, dt=0.01):
         z = x2z(x)
         u_star = np.zeros(nu)
         for i in range(nu):
-            u_star[i] = u[i].Evaluate(dict(zip(z_var, z)))
+            u_star[i] = np.clip(u[i].Evaluate(dict(zip(z_var, z))), u_min[i], u_max[i])
         u_traj.append(u_star)
         x_dot = fx(x, u_star, float)
         x = np.copy(x) + x_dot*dt
         traj.append(x)
     return np.array(traj), np.array(u_traj)
 
-def fit_polynomial_stabilizing_controller(deg1, deg2, deg3, collect_data=False):
+def fit_polynomial_stabilizing_controller(u_degrees, regression_type="ridge", collect_data=False):
     if collect_data:
         n_grid = 10
         X2, X3, X4 = np.meshgrid(np.linspace(-0.25, 0.25, n_grid),
@@ -150,43 +151,69 @@ def fit_polynomial_stabilizing_controller(deg1, deg2, deg3, collect_data=False):
         
     Z = x2z(x_data).T
 
-    degrees = [deg1, deg2, deg3]
-    os.makedirs("planar_pusher/data/correct_dynamics/{}".format(degrees), exist_ok=True)
+    os.makedirs("planar_pusher/data/correct_dynamics/{}".format(regression_type), exist_ok=True)
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz)
-    u1_lstsq = prog.NewFreePolynomial(Variables(z), deg1)
+    u1_lstsq = prog.NewFreePolynomial(Variables(z), u_degrees[0])
     u1_decision_variables = np.array(list(u1_lstsq.decision_variables()))
     nu1 = len(u1_decision_variables)
     calc_basis1 = construct_monomial_basis_from_polynomial(u1_lstsq, nu1, z)
     A1 = calc_basis1(Z)
-    u1_coeff, res1, _, _ = np.linalg.lstsq(A1, u_data[0])
-    print("Residual for u1: ", res1)
+    ridge_alpha = {4:[1e-6, 0.06, 20], 3:[1e-10, 10, 10], 6:[10, 1e2, 1e2], 2:[1e-10, 1e-10, 1e-2]}
+    if regression_type == "":
+        u1_coeff, res1, _, _ = np.linalg.lstsq(A1, u_data[0])
+        print("Residual for u1: ", res1)
+    else:
+        if regression_type == "lasso":
+            clf = Lasso(alpha=1e-5)
+        elif regression_type == "ridge":
+            clf = Ridge(alpha=ridge_alpha[u_degrees[0]][0])
+        clf.fit(A1, u_data[0])
+        u1_coeff = clf.coef_
+
     print(np.mean((A1@u1_coeff-u_data[0])**2))
     u1 = construct_polynomial_from_coeff(u1_lstsq, u1_coeff)
-    save_polynomial(u1, z, "planar_pusher/data/correct_dynamics/{}/u1.npy".format(degrees))
+    save_polynomial(u1, z, "planar_pusher/data/correct_dynamics/{}/u1_{}.npy".format(regression_type, u_degrees[0]))
 
-    u2_lstsq = prog.NewFreePolynomial(Variables(z), deg2)
+    u2_lstsq = prog.NewFreePolynomial(Variables(z), u_degrees[1])
     u2_decision_variables = np.array(list(u2_lstsq.decision_variables()))
     nu2 = len(u2_decision_variables)
     calc_basis2 = construct_monomial_basis_from_polynomial(u2_lstsq, nu2, z)
     A2 = calc_basis2(Z)
-    u2_coeff, res2, _, _ = np.linalg.lstsq(A2, u_data[1])
-    print("Residual for u2: ", res2)
+    if regression_type == "":
+        u2_coeff, res2, _, _ = np.linalg.lstsq(A2, u_data[1])
+        print("Residual for u2: ", res2)
+    else:
+        if regression_type == "lasso":
+            clf = Lasso(alpha=1e-5)
+        elif regression_type == "ridge":
+            clf = Ridge(alpha=ridge_alpha[u_degrees[1]][1])
+        clf.fit(A2, u_data[1])
+        u2_coeff = clf.coef_
+
     print(np.mean((A2@u2_coeff-u_data[1])**2))
     u2 = construct_polynomial_from_coeff(u2_lstsq, u2_coeff)
-    save_polynomial(u2, z, "planar_pusher/data/correct_dynamics/{}/u2.npy".format(degrees))
+    save_polynomial(u2, z, "planar_pusher/data/correct_dynamics/{}/u2_{}.npy".format(regression_type, u_degrees[1]))
 
-    u3_lstsq = prog.NewFreePolynomial(Variables(z), deg3)
+    u3_lstsq = prog.NewFreePolynomial(Variables(z), u_degrees[2])
     u3_decision_variables = np.array(list(u3_lstsq.decision_variables()))
     nu3 = len(u3_decision_variables)
     calc_basis3 = construct_monomial_basis_from_polynomial(u3_lstsq, nu3, z)
     A3 = calc_basis3(Z)
-    u3_coeff, res3, _, _ = np.linalg.lstsq(A3, u_data[2])
-    print("Residual for u3: ", res3)
+    if regression_type == "":
+        u3_coeff, res3, _, _ = np.linalg.lstsq(A3, u_data[2])
+        print("Residual for u3: ", res3)
+    else:
+        if regression_type == "lasso":
+            clf = Lasso(alpha=1e-5)
+        elif regression_type == "ridge":
+            clf = Ridge(alpha=ridge_alpha[u_degrees[2]][2])
+        clf.fit(A3, u_data[2])
+        u3_coeff = clf.coef_
+
     print(np.mean((A3@u3_coeff-u_data[2])**2))
     u3 = construct_polynomial_from_coeff(u3_lstsq, u3_coeff)
-    save_polynomial(u3, z, "planar_pusher/data/correct_dynamics/{}/u3.npy".format(degrees))
-
+    save_polynomial(u3, z, "planar_pusher/data/correct_dynamics/{}/u3_{}.npy".format(regression_type, u_degrees[2]))
 
 def plot_traj(traj, deg):
     print("Plotting trajectory")
@@ -214,25 +241,24 @@ def plot_traj(traj, deg):
         draw_box(traj[n], w_pusher=True)
     ax.add_patch(Rectangle((-px, -px), 2*px, 2*px, 0, edgecolor='deeppink', linestyle="--", linewidth=2, facecolor='none', antialiased="True"))
     plt.xlim([-0.35, 0.2])
-    plt.ylim([-0.2, 0.35])
-    plt.savefig("planar_pusher/figures/trajectory/correct_dynamics/traj_opt_{}_mu_{}.png".format(deg, mu_p))
+    plt.ylim([-0.35, 0.35])
+    plt.savefig("planar_pusher/figures/trajectory/correct_dynamics/traj_{}_mu_{}.png".format(deg, mu_p))
 
-def simulate_polynomial_controller():
-    fit_polynomial_stabilizing_controller(6, 6, 6)
-    degrees = list(np.ones(nu, dtype=int) * 4)
+def simulate_polynomial_controller(u_degrees, regression_type="ridge"):
+    # fit_polynomial_stabilizing_controller(u_degrees, regression_type=regression_type)
     z_var = MakeVectorVariable(nz, "z")
     u = np.zeros(nu, dtype=Expression)
     for i in range(nu):
-        u[i] = load_polynomial(z_var, "planar_pusher/data/correct_dynamics/{}/u{}.npy".format(degrees, i+1))
-    x0 = np.array([-0.25, 0.25, 0, 0])
-    traj, u_traj = simulate_traj_opt(u, z_var, x0)
-    plot_traj(traj, degrees[0])
+        u[i] = load_polynomial(z_var, "planar_pusher/data/correct_dynamics/{}/u{}_{}.npy".format(regression_type, i+1, u_degrees[i]))
+    x0 = np.array([-0.25, 0.25, np.pi/4, 0])
+    traj, u_traj = simulate_traj_opt(u, z_var, x0, T=8)
+    plot_traj(traj, u_degrees)
 
 def simulate_value_function(deg):
     z_var = MakeVectorVariable(nz, "z")
-    x0 = np.array([-0.25, 0.25, 0, 0])    
+    x0 = np.array([-2.31772895e-01,  2.77674597e-01, -1.20107703e+00, -2.81870448e-04])    
     J_star = load_polynomial(z_var, "planar_pusher/data/correct_dynamics/J_lower_deg_{}_mup_{}.pkl".format(deg, mu_p))
-    traj, u_traj, J_traj = simulate(J_star, z_var, x0, T=10,  initial_guess=False)
+    traj, u_traj, J_traj = simulate(J_star, z_var, x0, T=9.46,  initial_guess=True)
     plot_traj(traj, deg)
 
     plt.clf()
@@ -240,5 +266,6 @@ def simulate_value_function(deg):
     plt.savefig("planar_pusher/figures/trajectory/correct_dynamics/J_{}_mu_{}.png".format(deg, mu_p))
 
 if __name__ == '__main__':
-    traj_guess = np.load("planar_pusher/data/traj.npy")
+    traj_guess = np.load("planar_pusher/data/traj.npy")[54:, :]
     simulate_value_function(2)
+    # simulate_polynomial_controller([4, 4, 4], regression_type="ridge")
