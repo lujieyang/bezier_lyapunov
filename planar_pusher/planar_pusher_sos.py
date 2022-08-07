@@ -167,6 +167,168 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
         plot_value_function(J_star, z, z_max, x2z, file_name="correct_dynamics/lower_bound_{}_{}_mup_{}".format(objective, deg, mu_p), plot_states="xtheta")
     return J_star, z
 
+def planar_pusher_sos_upper_bound(deg, u_degrees, u_regression_type="ridge", objective="integrate_ring", visualize=False, test=False):
+    """x = [x, y, theta, py]
+    z = [x, y, s, c, py]
+    u = [fn, ft, v_py]
+    """
+    nz = 5
+    nx = 4
+    nu = 3
+    
+    x0 = np.zeros(4)
+    px = 0.05
+    mu_g = 0.35
+    mu_p = 0.2
+    m = 1
+    g = 9.81
+    fm = mu_g*m*g
+    mm = integrate.dblquad(lambda y, x: np.sqrt(x**2+y**2), -px, px, lambda x: -px, lambda x: px)[0]/(2*px)**2 *mu_g * m * g
+
+    d_theta = np.pi/4
+    z_max = np.array([0, 0.25, np.sin(d_theta), 1, px])
+    z_min = np.array([-0.25, -0.25, -np.sin(d_theta), np.cos(d_theta), -px])
+    assert (z_min<=z_max).all()
+
+    x2z = lambda x : np.array([x[0], x[1], np.sin(x[2]), np.cos(x[2]), x[3]])
+    # Equilibrium point in both the system coordinates.
+    z0 = x2z(x0)
+        
+    # Quadratic running cost in augmented state.
+    Q = np.diag([100, 100, 150, 150, 0])
+    R = np.eye(nu)/100
+    def l_cost(z, u):
+        return (z - z0).dot(Q).dot(z - z0) + (u).dot(R).dot(u )
+
+    def f(z, u, dtype=Expression):
+        assert len(z) == nz
+        assert len(u) == nu
+        s = z[2]
+        c = z[3]
+        f_val = np.zeros(nz, dtype=dtype)
+        f_val[0] = (c*u[0] - s*u[1])/fm**2
+        f_val[1] = (s*u[0] + c*u[1])/fm**2
+        thetadot = (-z[-1]*u[0] - px*u[1])/mm**2
+        f_val[2] = c*thetadot
+        f_val[3] = -s*thetadot
+        f_val[4] = u[-1]
+        return f_val
+
+    def fx(x, u, dtype=Expression):
+        assert len(x) == nx
+        assert len(u) == nu
+        s = np.sin(x[2])
+        c = np.cos(x[2])
+        f_val = np.zeros(nx, dtype=dtype)
+        f_val[0] = (c*u[0] - s*u[1])/fm**2
+        f_val[1] = (s*u[0] + c*u[1])/fm**2
+        thetadot = (-x[-1]*u[0] - px*u[1])/mm**2
+        f_val[2] = thetadot
+        f_val[3] = u[-1]
+        return f_val
+    
+    def f2x(x, dtype=Expression):
+        assert len(x) == nx
+        s = np.sin(x[2])
+        c = np.cos(x[2])
+        f2_val = np.zeros([nx, nu], dtype=dtype)
+        f2_val[0] = np.array([c, -s, 0])/fm**2
+        f2_val[1] = np.array([s, c, 0])/fm**2
+        f2_val[2] = np.array([-x[-1], -px, 0])/mm**2
+        f2_val[3] = np.array([0, 0, 1])
+        return f2_val
+    
+    if test:
+        return nz, nx, nu, f, fx, f2x, mu_p, px, l_cost, x2z
+
+    non_q_idx = [0, 1, 4]
+
+    prog = MathematicalProgram()
+    z = prog.NewIndeterminates(nz, 'z')
+    u_fixed = np.zeros(nu, dtype=Expression)
+    for i in range(nu):
+        u_fixed[i] = load_polynomial(z, "planar_pusher/data/correct_dynamics/{}/u{}_{}.npy".format(u_regression_type, i+1, u_degrees[i]))
+    J = prog.NewFreePolynomial(Variables(z), deg)
+    J_expr = J.ToExpression()
+
+    # Maximize volume beneath the value function.
+    if objective=="integrate_all":
+        obj = J
+        for i in range(nz):
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        prog.AddCost(-obj.ToExpression())
+    elif objective=="integrate_ring":
+        obj = J
+        for i in non_q_idx:
+            obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        cost = 0
+        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+            s1_deg = monomial.degree(z[2]) 
+            c1_deg = monomial.degree(z[3])
+            monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, -d_theta, d_theta)[0]
+            cost += monomial_int1 * coeff        
+        poly = Polynomial(cost)
+        cost_coeff = [c.Evaluate() for c in poly.monomial_to_coefficient_map().values()]
+        # Make the numerics better
+        cost = cost/np.max(np.abs(cost_coeff))
+        cost = Polynomial(cost).RemoveTermsWithSmallCoefficients(1e-6)
+        prog.AddLinearCost(cost.ToExpression())
+
+    # J(z0) = 0.
+    J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
+    prog.AddLinearConstraint(J0 == 0)
+
+    # Enforce Bellman inequality.
+    f_val = f(z, u_fixed)
+    J_dot = J_expr.Jacobian(z).dot(f_val)
+    LHS = -(J_dot + l_cost(z, u_fixed))
+
+    lam_deg = Polynomial(LHS).TotalDegree()
+    # S procedure for s^2 + c^2 = 1.
+    lam_ring = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    S_ring = lam_ring * (z[2]**2 + z[3]**2 - 1)
+
+    # Friction complementarity constraints
+    lam_a = prog.NewSosPolynomial(Variables(z), 4)[0].ToExpression()
+    lam_b = prog.NewSosPolynomial(Variables(z), 4)[0].ToExpression()
+    lam_c = prog.NewFreePolynomial(Variables(z), 4).ToExpression()
+    lam_d = prog.NewSosPolynomial(Variables(z), 4)[0].ToExpression()
+    S_complementarity = -lam_a*u_fixed[-1]*u_fixed[1] + lam_b*(u_fixed[1]**2 - mu_p**2*u_fixed[0]**2) + lam_c*(u_fixed[1]**2 - mu_p**2*u_fixed[0]**2)*u_fixed[-1] -lam_d * u_fixed[0] 
+    
+    S_Jdot = 0
+    for i in np.arange(nz):
+        lam = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()
+        S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+    prog.AddSosConstraint(LHS + S_ring + S_Jdot + S_complementarity)
+
+    # Enforce that value function is PD
+    lam_r = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_r = lam_r * (z[2]**2 + z[3]**2 - 1)
+    S_J = 0
+    for i in np.arange(nz):
+        lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+        S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+    # Friction complementarity constraints
+    lam_a = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    lam_b = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    lam_c = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    lam_d = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+    S_complementarity = -lam_a*u_fixed[-1]*u_fixed[1] + lam_b*(u_fixed[1]**2 - mu_p**2*u_fixed[0]**2) + lam_c*(u_fixed[1]**2 - mu_p**2*u_fixed[0]**2)*u_fixed[-1] -lam_d * u_fixed[0] 
+    prog.AddSosConstraint(J_expr + S_J + S_r + S_complementarity)
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    print("Start solving...")
+    result = Solve(prog)
+    assert result.is_success()
+    J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
+
+    save_polynomial(J_star, z, 'planar_pusher/data/correct_dynamics/{}/J_upper_deg_{}_udeg_{}_mup_{}.pkl'.format(u_regression_type, deg, u_degrees, mu_p))
+    if visualize:
+        plot_value_function(J_star, z, z_max, x2z, file_name="correct_dynamics/upper_bound_{}_{}_{}_{}_mup_{}".format(objective, deg, u_degrees, u_regression_type, mu_p), plot_states="xtheta")
+    return J_star, z
+
 def plot_value_function(J_star, z, z_max, x2z, file_name="", plot_states="xy", switch_contact=False):
     x_max = np.zeros(4)
     x_max[:2] = z_max[:2]
@@ -668,4 +830,5 @@ def planar_pusher_single_contact_switching_sos_lower_bound(deg, objective="integ
 
 if __name__ == '__main__':
     deg = 2
-    J_star, z = planar_pusher_sos_lower_bound(deg, objective="integrate_ring",visualize=True)
+    u_degrees = [4, 4, 4]
+    J_star, z = planar_pusher_sos_upper_bound(deg, u_degrees, "ridge", visualize=True)
