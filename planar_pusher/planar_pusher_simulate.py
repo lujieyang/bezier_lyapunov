@@ -5,16 +5,18 @@ from utils import load_polynomial
 from pydrake.all import MakeVectorVariable, MathematicalProgram, SolverOptions, CommonSolverOption, Solve
 from planar_pusher_sos import planar_pusher_sos_lower_bound
 
-nz, nu, f, fx, f2x, mu_p, px, l_cost, x2z = planar_pusher_sos_lower_bound(2, test=True)
+nz, nx, nu, f, fx, f2x, mu_p, px, l_cost, x2z = planar_pusher_sos_lower_bound(2, test=True)
 u_max = np.array([1, 1, 0.1])
 u_min = np.array([0, -1, -0.1])
-def simulate(dJdz, z_var, x0, T=5, dt=0.01, initial_guess=False):
+def simulate(J_star, z_var, x0, T=5, dt=0.01, initial_guess=False):
     print("Simulating...")
     N = int(T/dt)
     x = x0
     traj = [x0]
     u_traj = []
+    J_traj = []
     u_guess = None
+    dJdz = J_star.Jacobian(z_var)
     for n in range(N):
         z = x2z(x)
         dJdz_val = np.zeros(nz)
@@ -29,7 +31,8 @@ def simulate(dJdz, z_var, x0, T=5, dt=0.01, initial_guess=False):
         x_dot = fx(x, u_star, float)
         x = np.copy(x) + x_dot*dt
         traj.append(x)
-    return np.array(traj), np.array(u_traj)
+        J_traj.append(J_star.Evaluate(dict(zip(z_var, z))))
+    return np.array(traj), np.array(u_traj), np.array(J_traj)
 
 def calc_u_initial_guess(x, H, dt):
     x_guess = np.linspace(x, np.zeros(4), H)
@@ -62,6 +65,8 @@ def calc_optimal_conrol_nlp(z, dJdz_val, u_guess=None):
 
     for i in range(nu):
         u_star[i] = np.clip(u_star[i], u_min[i], u_max[i])
+    
+    # print(result.get_optimal_cost())
 
     return u_star
 
@@ -89,20 +94,21 @@ def plot_traj(traj, deg):
         draw_box(traj[n], w_pusher=True)
     for n in range(20, traj.shape[0], 10):
         draw_box(traj[n], w_pusher=True)
-    ax.add_patch(Rectangle((-px, -px), 2*px, 2*px, 0, edgecolor='yellow', linestyle="--", linewidth=2, facecolor='none', antialiased="True"))
+    ax.add_patch(Rectangle((-px, -px), 2*px, 2*px, 0, edgecolor='deeppink', linestyle="--", linewidth=2, facecolor='none', antialiased="True"))
     plt.xlim([-0.35, 0.2])
     plt.ylim([-0.2, 0.35])
-    plt.savefig("planar_pusher/figures/trajectory/trajectory_{}_mu_{}.png".format(deg, mu_p))
+    plt.savefig("planar_pusher/figures/trajectory/traj_{}_mu_{}.png".format(deg, mu_p))
 
 
 if __name__ == '__main__':
     deg = 2
     z_var = MakeVectorVariable(nz, "z")
-    d_theta = np.pi/4
-    z_max = np.array([0.15, 0.15, np.sin(d_theta), 1, px])
     J_star = load_polynomial(z_var, "planar_pusher/data/J_lower_deg_{}_mup_{}.pkl".format(deg, mu_p))
-    dJdz = J_star.Jacobian(z_var)
 
     x0 = np.array([-0.28, 0.28, 0, 0])
-    traj, u_traj = simulate(dJdz, z_var, x0, T=10,  initial_guess=True)
+    traj, u_traj, J_traj = simulate(J_star, z_var, x0, T=10,  initial_guess=True)
     plot_traj(traj, deg)
+
+    plt.clf()
+    plt.plot(J_traj)
+    plt.savefig("planar_pusher/figures/trajectory/J_{}_mu_{}.png".format(deg, mu_p))
