@@ -188,9 +188,8 @@ def calc_normal(x):
         raise Exception("Invalid configuration!")
     return n, d
 
-def plot_traj(traj, deg):
+def plot_traj(ax, traj, pusher_color="r"):
     print("Plotting trajectory")
-    fig, ax = plt.subplots()
     plt.plot(traj[:, 0], traj[:, 1], 'k')
 
     def draw_box(x, w_pusher=False, r=0.01, object_color="b", pusher_color="r"):
@@ -218,16 +217,15 @@ def plot_traj(traj, deg):
             drawing_colored_circle = plt.Circle((x_pusher, y_pusher), r, edgecolor='k', facecolor=pusher_color)
             ax.set_aspect( 1 )
             ax.add_artist(drawing_colored_circle)
-
-    draw_box(traj[0], w_pusher=True, object_color="green", pusher_color="green")     
-    for n in range(10, 20, 10):
-        draw_box(traj[n], w_pusher=True)
+    
+    for n in range(1, 21, 10):
+        draw_box(traj[n], w_pusher=True, pusher_color=pusher_color)
     for n in range(30, traj.shape[0], 35):
-        draw_box(traj[n], w_pusher=True)
+        draw_box(traj[n], w_pusher=True, pusher_color=pusher_color)
     ax.add_patch(Rectangle((-px, -px), 2*px, 2*px, 0, edgecolor='deeppink', linestyle="--", linewidth=2, facecolor='none', antialiased="True"))
-    plt.xlim([-0.4, 0.2])
-    plt.ylim([-0.4, 0.4])
-    plt.savefig("planar_pusher/figures/trajectory/four_modes/trajectory_{}.png".format(deg, mu_p))
+    plt.xlim([-0.35, 0.2])
+    plt.ylim([-0.2, 0.35])
+    # plt.savefig("planar_pusher/figures/trajectory/four_modes/trajectory_{}.png".format(deg, mu_p))
 
 if __name__ == '__main__':
     deg = 2
@@ -236,6 +234,12 @@ if __name__ == '__main__':
     J_star = load_polynomial(z_var, "planar_pusher/data/four_modes/{}/J_lower_deg_2_100.pkl".format(Q_teleport_scale))
     dJdz = J_star.Jacobian(z_var)
 
-    x0 = np.array([0, 0.28, 0, 0, -px])
+    x0 = np.array([-0.28, 0, 0, -px, 0])
     traj, u_traj = simulate(J_star, dJdz, z_var, x0, T=10,  initial_guess=True)
-    plot_traj(traj, deg)
+    traj[:, 1] += 0.28
+    fig, ax = plt.subplots()
+    plot_traj(ax, traj)
+    x0 = np.array([0, 0.28, 0, -px, 0])
+    traj, u_traj = simulate(J_star, dJdz, z_var, x0, T=10,  initial_guess=True)
+    plot_traj(ax, traj, pusher_color="green")
+    plt.savefig("planar_pusher/figures/trajectory/four_modes/2_stops.png".format(deg, mu_p))
