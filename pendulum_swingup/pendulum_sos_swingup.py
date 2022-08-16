@@ -1,8 +1,8 @@
 import numpy as np
 from scipy.integrate import quad
 from utils import load_polynomial, save_polynomial
-from pydrake.examples.pendulum import (PendulumParams, PendulumPlant, PendulumInput)
-from pydrake.all import (MathematicalProgram, Variables, Solve, Polynomial, SolverOptions, CommonSolverOption, Linearize, LinearQuadraticRegulator)
+from pydrake.examples.pendulum import (PendulumParams)
+from pydrake.all import (MathematicalProgram, Variables, Solve, Polynomial, SolverOptions, CommonSolverOption, MakeVectorVariable, LinearQuadraticRegulator)
 from polynomial_integration_fvi import plot_value_function_sos
 
 # Given the degree for the approximate value function and the polynomials
@@ -34,8 +34,8 @@ def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False, t
     # State limits (region of state space where we approximate the value function).
     x_max = np.array([np.pi, 2*np.pi])
     x_min = - x_max
-    z_max = x2z(x_max)
-    z_min = x2z(x_min)
+    z_max = np.array([1, 1, x_max[0]])
+    z_min = -z_max
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([0, 0])
@@ -51,7 +51,7 @@ def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False, t
     f2 = np.array([[0], [0], [1 / inertia]])
 
     if test:
-        return nz, f, f2, Rinv, z0, l
+        return nz, f, f2, Rinv, z0, l, z_max
 
     # Set up optimization.
     prog = MathematicalProgram()
@@ -79,35 +79,37 @@ def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False, t
             cost += monomial_int * coeff
         prog.AddLinearCost(-c_r * cost)
 
+    J_dot = J_expr.Jacobian(z).dot(f(z, u))
+    LHS = J_dot + l(z, u)
+
     # S procedure for s^2 + c^2 = 1.
-    lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
-    S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
-    lam_2_Jdot = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_1 = lam_2_Jdot * (z[2]**2 - 4*np.pi**2)
-    lam_2_J = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_2 = lam_2_J * (z[2]**2 - 4*np.pi**2)
+    lam_r = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_r = lam_r * (z[0]**2 + z[1]**2 - 1)
+    S_Jdot = 0
+    for i in range(nz):
+        lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+        S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
 
     # Enforce Bellman inequality.
-    J_dot = J_expr.Jacobian(z).dot(f(z, u))
-    if deg <= 4:
-        prog.AddSosConstraint(J_dot + l(z, u) + S_procedure + S_procedure_1)
-    else:
-        prog.AddSosConstraint(J_dot + l(z, u) + S_procedure)
+    prog.AddSosConstraint(LHS + S_r + S_Jdot)
 
+    lam_r = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_r = lam_r * (z[0]**2 + z[1]**2 - 1)
+    S_J = 0
+    for i in range(nz):
+        lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
+        S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
     # Enforce that value function is PD
-    if deg <= 4:
-        prog.AddSosConstraint(J_expr + S_procedure_2)
-    else:
-        prog.AddSosConstraint(J_expr)
+    prog.AddSosConstraint(J_expr + S_r + S_J)
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
     prog.AddLinearConstraint(J0 == 0)
 
     # Solve and retrieve result.
-    # options = SolverOptions()
-    # options.SetOption(CommonSolverOption.kPrintToConsole, 1)
-    # prog.SetSolverOptions(options)
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
     result = Solve(prog)
     assert result.is_success()
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
@@ -116,7 +118,7 @@ def pendulum_sos_lower_bound(deg, objective="integrate_ring", visualize=False, t
     dJdz = J_star.ToExpression().Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
 
-    save_polynomial(J_star, z, "pendulum_swingup/data/J_lower_l-a_deg_{}.pkl".format(deg))
+    # save_polynomial(J_star, z, "pendulum_swingup/data/J_lower_l-a_deg_{}.pkl".format(deg))
     if visualize:
         plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_{}".format(objective))
     return J_star, u_star, z
@@ -292,8 +294,8 @@ def pendulum_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
     # State limits (region of state space where we approximate the value function).
     x_max = np.array([np.pi, 2*np.pi])
     x_min = - x_max
-    z_max = x2z(x_max)
-    z_min = x2z(x_min)
+    z_max = np.array([1, 1, x_max[0]])
+    z_min = -z_max
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([0, 0])
@@ -343,26 +345,36 @@ def pendulum_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
         cost += monomial_int * coeff
     a_cost = prog.AddLinearCost(c_r * cost)
 
-    # S procedure for s^2 + c^2 = 1.
-    lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
-    S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
-    lam_1 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
-    lam_2 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_2 = lam_2 * (z[2]**2 - 4*np.pi**2)
-
     # Enforce Bellman inequality.
     J_dot = J_expr.Jacobian(z).dot(f(z, u_fixed))
-    prog.AddSosConstraint(a.ToExpression() - J_dot - l(z, u_fixed) + S_procedure + S_procedure_1)
+    LHS = a.ToExpression() - J_dot - l(z, u_fixed)
+    # S procedure for s^2 + c^2 = 1.
+    lam_ring = prog.NewFreePolynomial(Variables(z), deg+4).ToExpression()
+    S_ring = lam_ring * (z[0]**2 + z[1]**2 - 1)
+    S_Jdot = 0
+    for i in range(nz):
+        lam = prog.NewSosPolynomial(Variables(z), deg+4)[0].ToExpression()
+        S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+    prog.AddSosConstraint(LHS + S_ring + S_Jdot)
 
+    lam_r = prog.NewFreePolynomial(Variables(z), deg+4).ToExpression()
+    S_r = lam_r * (z[0]**2 + z[1]**2 - 1)
+    S_J = 0
+    for i in range(nz):
+        lam = prog.NewSosPolynomial(Variables(z), deg+4)[0].ToExpression()
+        S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
     # Enforce that value function is PD
-    prog.AddSosConstraint(J_expr + S_procedure_2)
+    prog.AddSosConstraint(J_expr + S_r + S_J)
 
     # Enforce l(x,u)-a(x) is PD
     u = prog.NewIndeterminates(nu, 'u')
-    lam_3 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_3 = lam_3 * (z[2]**2 - 4*np.pi**2)
-    prog.AddSosConstraint(l(z,u) - a.ToExpression() + S_procedure_3)
+    lam_r = prog.NewFreePolynomial(Variables(z), deg+4).ToExpression()
+    S_r = lam_r * (z[0]**2 + z[1]**2 - 1)
+    S_la = 0
+    for i in range(nz):
+        lam = prog.NewSosPolynomial(Variables(z), deg+4)[0].ToExpression()
+        S_la += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+    prog.AddSosConstraint(l(z,u) - a.ToExpression() + S_r + S_la)
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
@@ -372,7 +384,7 @@ def pendulum_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
     options.SetOption(CommonSolverOption.kPrintToConsole, 1)
     prog.SetSolverOptions(options)
     result = Solve(prog)
-    # assert result.is_success()
+    assert result.is_success()
     a_star = result.GetSolution(a).RemoveTermsWithSmallCoefficients(1e-6).ToExpression()
 
     prog.RemoveCost(a_cost)
@@ -397,7 +409,7 @@ def pendulum_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring",
         prog.AddLinearCost(c_r * cost)
 
     # Enforce Bellman inequality.
-    prog.AddSosConstraint(a_star - J_dot - l(z, u_fixed) + S_procedure + S_procedure_1)
+    prog.AddSosConstraint(a_star - J_dot - l(z, u_fixed) + S_ring + S_Jdot)
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
@@ -522,11 +534,133 @@ def pendulum_sos_control_affine_dp(deg):
     plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, directory="sos")
     return J_star, u_star, z
 
+def maximize_roa(V_deg=2):
+    nz, f, f2, Rinv, z0, l, z_max = pendulum_sos_lower_bound(2, test=True)
+    z = MakeVectorVariable(nz, "z")
+
+    J = load_polynomial(z, "pendulum_swingup/data/J_upper_deg_2.pkl")
+    dJdz = J.Jacobian(z)
+    u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
+    f_cl = f(z, u_star)
+    rho0 = pendulum_lower_bound_roa()
+
+    V_scale = 0
+    for j in range(nz):
+        ej = np.zeros(nz)
+        ej[j] = 1
+        V_scale += J.Evaluate(dict(zip(z, ej)))
+
+    def search_lambda(V_star, rho_star):
+        prog = MathematicalProgram()
+        prog.AddIndeterminates(z)
+        dVdz = V_star.Jacobian(z)
+        V_dot = dVdz.dot(f_cl)
+
+        lhs_deg = Polynomial(V_dot).TotalDegree()
+        lam_rho_deg = lhs_deg
+        lam_rho_Vdot = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_rho_deg/2)*2))[0].ToExpression()
+        S_rho = lam_rho_Vdot * (V_star - rho_star)
+        lam_r_Vdot = prog.NewFreePolynomial(Variables(z), lhs_deg).ToExpression()
+        S_r = lam_r_Vdot*(z[0]**2+z[1]**2-1)
+        S_Vdot = 0
+        # for i in range(nz):
+        #     lam = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_rho_deg/2)*2))[0].ToExpression()
+        #     S_Vdot += lam * (z[i]+z_max[i]) * (z[i]-z_max[i])
+        prog.AddSosConstraint(-V_dot + S_r + S_rho + S_Vdot)
+
+        lam_rho_deg = Polynomial(V_star).TotalDegree()
+        lam_rho_V = prog.NewSosPolynomial(Variables(z), lam_rho_deg)[0].ToExpression()
+        S_rho = lam_rho_V * (V_star - rho_star)
+        lam_r_V = prog.NewFreePolynomial(Variables(z), lam_rho_deg).ToExpression()
+        S_r = lam_r_V*(z[0]**2+z[1]**2-1)
+        S_V = 0
+        # for i in range(nz):
+        #     lam = prog.NewSosPolynomial(Variables(z), lam_rho_deg)[0].ToExpression()
+        #     S_V += lam * (z[i]+z_max[i]) * (z[i]-z_max[i])
+        prog.AddSosConstraint(V_star + S_r + S_rho + S_V)   
+
+        # options = SolverOptions()
+        # options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+        # prog.SetSolverOptions(options)
+        result = Solve(prog)
+        assert result.is_success()
+
+        lam_rho_star = []
+        for lam in [lam_rho_Vdot, lam_rho_V, lam_r_Vdot, lam_r_V]:
+            lam = result.GetSolution(lam)
+            lam_rho_star.append(Polynomial(lam).RemoveTermsWithSmallCoefficients(1e-6).ToExpression())
+        return lam_rho_star
+
+    def search_V_rho(lam_rho_star):
+        prog = MathematicalProgram()
+        prog.AddIndeterminates(z)
+        V = prog.NewFreePolynomial(Variables(z), V_deg).ToExpression()
+        rho = prog.NewContinuousVariables(1, 'rho')[0]
+
+        dVdz = V.Jacobian(z)
+        V_dot = dVdz.dot(f_cl)
+        S_rho = lam_rho_star[0] * (V - rho)
+        S_r = lam_rho_star[2]*(z[0]**2+z[1]**2-1)
+        # lhs_deg = Polynomial(V_dot).TotalDegree()
+        # lam_r = prog.NewFreePolynomial(Variables(z), lhs_deg).ToExpression()
+        # S_r = lam_r*(z[0]**2+z[1]**2-1)
+        S_Vdot = 0
+        # for i in range(nz):
+        #     lam = prog.NewSosPolynomial(Variables(z),  int(np.ceil(lhs_deg/2)*2))[0].ToExpression()
+        #     S_Vdot += lam * (z[i]+z_max[i]) * (z[i]-z_max[i])
+        prog.AddSosConstraint(-V_dot + S_r + S_rho + S_Vdot)
+
+        S_rho = lam_rho_star[1] * (V - rho)
+        S_r = lam_rho_star[3]*(z[0]**2+z[1]**2-1)
+        # lam_r = prog.NewFreePolynomial(Variables(z), V_deg).ToExpression()
+        # S_r = lam_r*(z[0]**2+z[1]**2-1)
+        S_V = 0
+        # for i in range(nz):
+        #     lam = prog.NewSosPolynomial(Variables(z), V_deg)[0].ToExpression()
+        #     S_V += lam * (z[i]+z_max[i]) * (z[i]-z_max[i])
+        prog.AddSosConstraint(V + S_r + S_rho + S_V)   
+
+        # Fix V scale
+        V_ej = 0
+        for j in range(nz):
+            ej = np.zeros(nz)
+            ej[j] = 1
+            V_ej += V.EvaluatePartial(dict(zip(z, ej)))        
+        prog.AddLinearConstraint(V_ej == 1)
+        
+        V0 = V.EvaluatePartial(dict(zip(z, z0)))
+        prog.AddLinearConstraint(V0 == 0)
+        prog.AddLinearCost(-rho)
+
+        # options = SolverOptions()
+        # options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+        # prog.SetSolverOptions(options)
+        result = Solve(prog)
+        assert result.is_success()
+
+        return result.GetSolution(V), result.GetSolution(rho)
+    
+    V_star = J/V_scale
+    rho_star = rho0/V_scale
+    try:
+        for i in range(500):
+            if i % 50 == 0:
+                print("Iter. ", i)
+            lam_rho_star = search_lambda(V_star, rho_star)
+            V_star, rho_star = search_V_rho(lam_rho_star)
+    except:
+        pass
+    
+    save_polynomial(Polynomial(V_star), z, "pendulum_swingup/data/V_roa_deg_{}.pkl".format(V_deg))
+    print("rho: ", rho_star)
+
+    return V_star, rho_star
+
 def pendulum_lower_bound_roa():
-    nz, f, f2, Rinv, z0, l = pendulum_sos_lower_bound(2, test=True)
+    nz, f, f2, Rinv, z0, l, z_max = pendulum_sos_lower_bound(2, test=True)
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz, "z")
-    V = load_polynomial(z, "pendulum_swingup/data/J_upper_6_lower_deg_2.pkl")
+    V = load_polynomial(z, "pendulum_swingup/data/J_upper_deg_2.pkl")
     dVdz = V.Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dVdz.T)
     f_val = f(z, u_star)
@@ -556,7 +690,7 @@ def pendulum_lower_bound_roa():
     return rho_star
 
 def verify_hjb_inequality_on_roa(rho=70):
-    nz, f, f2, Rinv, z0, l = pendulum_sos_lower_bound(2, test=True)
+    nz, f, f2, Rinv, z0, l, z_max = pendulum_sos_lower_bound(2, test=True)
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz, "z")
     J = load_polynomial(z, "pendulum_swingup/data/J_upper_6_lower_deg_2.pkl")
@@ -580,7 +714,8 @@ def verify_hjb_inequality_on_roa(rho=70):
     assert result.is_success()
 
 if __name__ == '__main__':
+    # maximize_roa(2)
     # pendulum_lower_bound_roa()
     # verify_hjb_inequality_on_roa()
-    J_star, u_star, z = pendulum_sos_lower_bound(2, "integrate_ring", visualize=True)
-    # J_star, u_star, z = pendulum_sos_upper_bound_relaxed(6, 2, "integrate_ring", visualize=True)
+    # J_star, u_star, z = pendulum_sos_lower_bound(2, "integrate_ring", visualize=True)
+    J_star, u_star, z = pendulum_sos_upper_bound_relaxed(2, 2, "integrate_ring", visualize=True)
