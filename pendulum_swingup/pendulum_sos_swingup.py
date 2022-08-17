@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from scipy.integrate import quad
 from utils import load_polynomial, save_polynomial
 from pydrake.examples.pendulum import (PendulumParams)
@@ -165,10 +166,16 @@ def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visuali
         ]
 
     # State limits (region of state space where we approximate the value function).
-    x_max = np.array([np.pi, 2*np.pi])
-    x_min = - x_max
-    z_max = x2z(x_max)
-    z_min = x2z(x_min)
+    x_max = np.array([0.5*np.pi, 2*np.pi])
+    x_min = -x_max
+    if x_max[0] < 0.5*np.pi:
+        z_max = np.array([np.sin(x_max[0]), 1, x_max[-1]])
+        z_min = np.array([np.sin(x_min[0]), np.cos(x_max[0]), x_min[-1]])
+    else:
+        z_max = np.array([1, 1, x_max[-1]])
+        z_min = np.array([-1, np.cos(x_max[0]), x_min[-1]])
+    z_min[np.abs(z_min)<=1e-6] = 0
+    assert (z_min < z_max).all()
 
     # Equilibrium point in both the system coordinates.
     x0 = np.array([0, 0])
@@ -183,27 +190,11 @@ def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visuali
     # Fixed control law from lower bound
     J_lower, u_fixed, z = pendulum_sos_lower_bound(deg_lower)
 
-    # Check if u_fixed is stabilizing
-    dJdz = J_lower.ToExpression().Jacobian(z)
-    xdot = f(z, u_fixed)
-    Jdot = dJdz.dot(xdot)
-    prog0 = MathematicalProgram()
-    prog0.AddIndeterminates(z)
-    lam = prog0.NewFreePolynomial(Variables(z), deg).ToExpression()
-    S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
-    lam_1 = prog0.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
-    prog0.AddSosConstraint(-Jdot + S_procedure + S_procedure_1)
-    result0 = Solve(prog0)
-    assert result0.is_success()
-
     # Set up optimization.        
     prog = MathematicalProgram()
     prog.AddIndeterminates(z)
     J = prog.NewFreePolynomial(Variables(z), deg)
     J_expr = J.ToExpression()
-
-    a = prog.NewSosPolynomial(Variables(z), deg)[0]
 
     # Maximize volume beneath the value function.
     if objective=="integrate_all":
@@ -212,7 +203,7 @@ def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visuali
             obj = obj.Integrate(z[i], z_min[i], z_max[i])
         prog.AddCost(-obj.ToExpression())
     elif objective=="integrate_ring":
-        obj = J.Integrate(z[-1], z_min[-1], z_max[-1]) + 1e3 * a.Integrate(z[-1], z_min[-1], z_max[-1])
+        obj = J.Integrate(z[-1], z_min[-1], z_max[-1])
         c_r = 1
         cost = 0
         for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
@@ -224,26 +215,26 @@ def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visuali
             cost += monomial_int * coeff
         prog.AddLinearCost(c_r * cost)
 
-    # S procedure for s^2 + c^2 = 1.
-    lam = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
-    S_procedure = lam * (z[0]**2 + z[1]**2 - 1)
-    lam_1 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_1 = lam_1 * (z[2]**2 - 4*np.pi**2)
-    lam_2 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_2 = lam_2 * (z[2]**2 - 4*np.pi**2)
-
     # Enforce Bellman inequality.
     J_dot = J_expr.Jacobian(z).dot(f(z, u_fixed))
-    prog.AddSosConstraint(a.ToExpression() - J_dot - l(z, u_fixed) + S_procedure + S_procedure_1)
+    LHS = - J_dot - l(z, u_fixed)
+    # S procedure for s^2 + c^2 = 1.
+    lam_ring = prog.NewFreePolynomial(Variables(z), deg+4).ToExpression()
+    S_ring = lam_ring * (z[0]**2 + z[1]**2 - 1)
+    S_Jdot = 0
+    for i in range(nz):
+        lam = prog.NewSosPolynomial(Variables(z), deg+4)[0].ToExpression()
+        S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+    prog.AddSosConstraint(LHS + S_ring + S_Jdot)
 
+    lam_r = prog.NewFreePolynomial(Variables(z), deg+4).ToExpression()
+    S_r = lam_r * (z[0]**2 + z[1]**2 - 1)
+    S_J = 0
+    for i in range(nz):
+        lam = prog.NewSosPolynomial(Variables(z), deg+4)[0].ToExpression()
+        S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
     # Enforce that value function is PD
-    prog.AddSosConstraint(J_expr + S_procedure_2)
-
-    # Enforce l(x,u)-a(x) is PD
-    u = prog.NewIndeterminates(nu, 'u')
-    lam_3 = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
-    S_procedure_3 = lam_3 * (z[2]**2 - 4*np.pi**2)
-    prog.AddSosConstraint(l(z,u) - a.ToExpression() + S_procedure_3)
+    prog.AddSosConstraint(J_expr + S_r + S_J)
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
@@ -256,8 +247,6 @@ def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visuali
     result = Solve(prog)
     assert result.is_success()
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
-    a_star = result.GetSolution(a).RemoveTermsWithSmallCoefficients(1e-6)
-    l_val = Polynomial(result.GetSolution(l(z, u_fixed)))
 
     # Solve for the optimal feedback in augmented coordinates.
     Rinv = np.linalg.inv(R)
@@ -265,6 +254,8 @@ def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visuali
     dJdz = J_star.ToExpression().Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
 
+    os.makedirs("pendulum_swingup/data/{}".format(list(x_max)), exist_ok=True)
+    save_polynomial(J_star, z, "pendulum_swingup/data/{}/J_upper_deg_{}.pkl".format(list(x_max), deg))
     if visualize:
         plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_upper_bound_{}".format(objective))
     return J_star, u_star, z
@@ -685,7 +676,8 @@ def pendulum_lower_bound_roa():
     nz, f, f2, Rinv, z0, l, z_max = pendulum_sos_lower_bound(2, test=True)
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz, "z")
-    V = load_polynomial(z, "pendulum_swingup/data/roa/J_upper_2_lower_deg_2.pkl")
+    x_max = [0.5*np.pi, 2*np.pi]
+    V = load_polynomial(z, "pendulum_swingup/data/{}/J_upper_deg_2.pkl".format(x_max))
     dVdz = V.Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dVdz.T)
     f_val = f(z, u_star)
@@ -743,4 +735,4 @@ if __name__ == '__main__':
     # pendulum_lower_bound_roa()
     # verify_hjb_inequality_on_roa()
     # J_star, u_star, z = pendulum_sos_lower_bound(2, "integrate_ring", visualize=True)
-    J_star, u_star, z = pendulum_sos_upper_bound_relaxed(2, 2, "integrate_ring", visualize=True)
+    J_star, u_star, z = pendulum_sos_upper_bound(2, 2, "integrate_ring", visualize=True)
