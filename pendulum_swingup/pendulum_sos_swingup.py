@@ -166,7 +166,7 @@ def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visuali
         ]
 
     # State limits (region of state space where we approximate the value function).
-    x_max = np.array([0.5*np.pi, 2*np.pi])
+    x_max = np.array([0.8*np.pi, 2*np.pi])
     x_min = -x_max
     if x_max[0] < 0.5*np.pi:
         z_max = np.array([np.sin(x_max[0]), 1, x_max[-1]])
@@ -258,6 +258,143 @@ def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visuali
     save_polynomial(J_star, z, "pendulum_swingup/data/{}/J_upper_deg_{}.pkl".format(list(x_max), deg))
     if visualize:
         plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_upper_bound_{}".format(objective))
+    return J_star, u_star, z
+
+def pendulum_sos_iterative_upper_bound(deg, objective="integrate_ring", visualize=False):
+    # System dimensions. Here:
+    # x = [theta, theta_dot]
+    # z = [sin(theta), cos(theta), theta_dot]
+    nx = 2
+    nz = 3
+    nu = 1
+
+    # Map from original state to augmented state.
+    # Uses sympy to be able to do symbolic integration later on.
+    x2z = lambda x : np.array([np.sin(x[0]), np.cos(x[0]), x[1]])
+
+    # System dynamics in augmented state (z).
+    params = PendulumParams()
+    inertia = params.mass() * params.length() ** 2
+    tau_g = params.mass() * params.gravity() * params.length()
+    def f(z, u):
+        return [
+            z[1] * z[2],
+            - z[0] * z[2],
+            (tau_g * z[0] + u[0] - params.damping() * z[2]) / inertia
+        ]
+
+    # Equilibrium point in both the system coordinates.
+    x0 = np.array([0, 0])
+    z0 = x2z(x0)
+        
+    # Quadratic running cost in augmented state.
+    Q = np.diag([1, 1, 1]) * 10
+    R = np.diag([1])
+    Rinv = np.linalg.inv(R)
+    def l(z, u):
+        return (z - z0).dot(Q).dot(z - z0) + u.dot(R).dot(u)
+
+    f2 = np.array([[0], [0], [1 / inertia]])
+
+    def search_upper_bound(u_fixed, z_max, z_min):
+        # Set up optimization.        
+        prog = MathematicalProgram()
+        prog.AddIndeterminates(z)
+        J = prog.NewFreePolynomial(Variables(z), deg)
+        J_expr = J.ToExpression()
+
+        # Maximize volume beneath the value function.
+        if objective=="integrate_all":
+            obj = J
+            for i in range(nz):
+                obj = obj.Integrate(z[i], z_min[i], z_max[i])
+            prog.AddCost(-obj.ToExpression())
+        elif objective=="integrate_ring":
+            obj = J.Integrate(z[-1], z_min[-1], z_max[-1])
+            c_r = 1
+            cost = 0
+            for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+                s_deg = monomial.degree(z[0]) 
+                c_deg = monomial.degree(z[1])
+                monomial_int = quad(lambda x: np.sin(x)**s_deg * np.cos(x)**c_deg, 0, 2*np.pi)[0]
+                if np.abs(monomial_int) <=1e-5:
+                    monomial_int = 0
+                cost += monomial_int * coeff
+            prog.AddLinearCost(c_r * cost)
+
+        # Enforce Bellman inequality.
+        J_dot = J_expr.Jacobian(z).dot(f(z, u_fixed))
+        LHS = - J_dot - l(z, u_fixed)
+        # S procedure for s^2 + c^2 = 1.
+        lam_ring = prog.NewFreePolynomial(Variables(z), deg+4).ToExpression()
+        S_ring = lam_ring * (z[0]**2 + z[1]**2 - 1)
+        S_Jdot = 0
+        for i in range(nz):
+            lam = prog.NewSosPolynomial(Variables(z), deg+4)[0].ToExpression()
+            S_Jdot += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        prog.AddSosConstraint(LHS + S_ring + S_Jdot)
+
+        lam_r = prog.NewFreePolynomial(Variables(z), deg+4).ToExpression()
+        S_r = lam_r * (z[0]**2 + z[1]**2 - 1)
+        S_J = 0
+        for i in range(nz):
+            lam = prog.NewSosPolynomial(Variables(z), deg+4)[0].ToExpression()
+            S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        # Enforce that value function is PD
+        prog.AddSosConstraint(J_expr + S_r + S_J)
+
+        # J(z0) = 0.
+        J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
+        prog.AddLinearConstraint(J0 == 0)
+
+        # Solve and retrieve result.
+        options = SolverOptions()
+        options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+        prog.SetSolverOptions(options)
+        result = Solve(prog)
+        assert result.is_success()
+        J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
+
+        # Solve for the optimal feedback in augmented coordinates.
+        dJdz = J_star.ToExpression().Jacobian(z)
+        u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
+        return J_star, u_star
+    
+    # State limits (region of state space where we approximate the value function).
+    x_max = np.array([0.8*np.pi, 2*np.pi])
+    x_min = -x_max
+
+    x0_up = np.pi
+    x0_lo = 0.4*np.pi
+
+    z = MakeVectorVariable(nz, "z")
+    J_upper = load_polynomial(z, "pendulum_swingup/data/J_upper_deg_2.pkl")
+    dJdz = J_upper.Jacobian(z)
+    u_fixed = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
+
+    for i in range(10):
+        print("Iter.", i)
+        if x_max[0] < 0.5*np.pi:
+            z_max = np.array([np.sin(x_max[0]), 1, x_max[-1]])
+            z_min = np.array([np.sin(x_min[0]), np.cos(x_max[0]), x_min[-1]])
+        else:
+            z_max = np.array([1, 1, x_max[-1]])
+            z_min = np.array([-1, np.cos(x_max[0]), x_min[-1]])
+        z_min[np.abs(z_min)<=1e-6] = 0
+        assert (z_min < z_max).all()
+
+        try:
+            J_star, u_fixed = search_upper_bound(u_fixed, z_max, z_min) 
+            x0_lo = x_max[0]
+            save_polynomial(J_star, z, "pendulum_swingup/data/J_upper_deg_{}_iter_{}.pkl".format(deg, i))
+            if visualize:
+                plot_value_function_sos(J_star, u_fixed, z, x_min, x_max, x2z, deg, file_name="iter_{}_sos_upper_bound".format(i))
+                print("x0 :", x_max[0]/np.pi)
+        except:
+            x0_up = x_max[0]
+        
+        x_max[0] = (x0_lo + x0_up)/2
+
     return J_star, u_star, z
 
 def pendulum_sos_upper_bound_relaxed(deg, deg_lower, objective="integrate_ring", visualize=False, roa=False):
@@ -676,7 +813,7 @@ def pendulum_lower_bound_roa():
     nz, f, f2, Rinv, z0, l, z_max = pendulum_sos_lower_bound(2, test=True)
     prog = MathematicalProgram()
     z = prog.NewIndeterminates(nz, "z")
-    x_max = [0.5*np.pi, 2*np.pi]
+    x_max = [0.95*np.pi, 2*np.pi]
     V = load_polynomial(z, "pendulum_swingup/data/{}/J_upper_deg_2.pkl".format(x_max))
     dVdz = V.Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dVdz.T)
