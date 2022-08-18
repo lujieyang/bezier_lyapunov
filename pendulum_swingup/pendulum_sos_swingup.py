@@ -1,9 +1,10 @@
 import numpy as np
 import os
 from scipy.integrate import quad
-from utils import load_polynomial, save_polynomial
+from utils import load_polynomial, save_polynomial, construct_monomial_basis_from_polynomial
 from pydrake.examples.pendulum import (PendulumParams)
-from pydrake.all import (MathematicalProgram, Variables, Solve, Polynomial, SolverOptions, CommonSolverOption, MakeVectorVariable, LinearQuadraticRegulator)
+from pydrake.all import (MathematicalProgram, Variables, Solve, Polynomial, SolverOptions, CommonSolverOption, 
+MakeVectorVariable, LinearQuadraticRegulator, Jacobian)
 from polynomial_integration_fvi import plot_value_function_sos
 import mcint
 
@@ -142,7 +143,7 @@ def pendulum_lqr(z0):
     K = LinearQuadraticRegulator(A, B, Q, R)[0]
     return np.squeeze(K)
 
-def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visualize=False):
+def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visualize=False, eps=1e-5):
     # System dimensions. Here:
     # x = [theta, theta_dot]
     # z = [sin(theta), cos(theta), theta_dot]
@@ -230,11 +231,11 @@ def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visuali
     lam_r = prog.NewFreePolynomial(Variables(z), deg+4).ToExpression()
     S_r = lam_r * (z[0]**2 + z[1]**2 - 1)
     S_J = 0
-    for i in range(nz):
-        lam = prog.NewSosPolynomial(Variables(z), deg+4)[0].ToExpression()
-        S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+    # for i in range(nz):
+    #     lam = prog.NewSosPolynomial(Variables(z), deg+4)[0].ToExpression()
+    #     S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
     # Enforce that value function is PD
-    prog.AddSosConstraint(J_expr + S_r + S_J)
+    prog.AddSosConstraint(J_expr - eps * z.dot(z) + S_r + S_J)
 
     # J(z0) = 0.
     J0 = J_expr.EvaluatePartial(dict(zip(z, z0)))
@@ -254,11 +255,45 @@ def pendulum_sos_upper_bound(deg, deg_lower, objective="integrate_ring", visuali
     dJdz = J_star.ToExpression().Jacobian(z)
     u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)
 
-    os.makedirs("pendulum_swingup/data/{}".format(list(x_max)), exist_ok=True)
-    save_polynomial(J_star, z, "pendulum_swingup/data/{}/J_upper_deg_{}.pkl".format(list(x_max), deg))
+    save_polynomial(J_star, z, "pendulum_swingup/data/J_upper_deg_{}.pkl".format(deg))
     if visualize:
         plot_value_function_sos(J_star, u_star, z, x_min, x_max, x2z, deg, file_name="sos_upper_bound_{}".format(objective))
     return J_star, u_star, z
+
+def calculate_eps():
+    nz, f, f2, Rinv, z0, l, z_max = pendulum_sos_lower_bound(2, test=True)
+    prog = MathematicalProgram()
+    z = prog.NewIndeterminates(nz, "z")   
+    J =  prog.NewFreePolynomial(Variables(z), 2)
+    J_lower = load_polynomial(z, "pendulum_swingup/data/J_lower_deg_2.pkl")
+    dJdz = J_lower.Jacobian(z)
+    u_star = - .5 * Rinv.dot(f2.T).dot(dJdz.T)    
+
+    nJ = len(np.array(list(J.decision_variables())))
+    calc_basis = construct_monomial_basis_from_polynomial(J, nJ, z)
+    m = np.squeeze(calc_basis(1* z.reshape(1, -1)))
+    m_squared  = z.dot(z) #m.dot(m)
+
+    f_val = f(z, u_star)
+    d = m_squared.Jacobian(z).dot(f_val)
+    eps = prog.NewContinuousVariables(1, 'eps')[0]
+
+    lam_r = prog.NewFreePolynomial(Variables(z), 4).ToExpression()
+    S_r = lam_r * (z[0]**2 + z[1]**2 - 1)
+
+    prog.AddSosConstraint(l(z, u_star) + eps * d + S_r)
+    prog.AddLinearCost(-eps)
+
+    options = SolverOptions()
+    options.SetOption(CommonSolverOption.kPrintToConsole, 1)
+    prog.SetSolverOptions(options)
+    result = Solve(prog)
+    assert result.is_success()    
+
+    eps_star = result.GetSolution(eps)
+    print("eps: ", eps_star)
+
+    return eps_star
 
 def pendulum_sos_iterative_upper_bound(deg, objective="integrate_ring", visualize=False):
     # System dimensions. Here:
@@ -868,7 +903,7 @@ def verify_hjb_inequality_on_roa(rho=70):
     assert result.is_success()
 
 if __name__ == '__main__':
-    # maximize_roa(2)
+    # eps = calculate_eps()
     # pendulum_lower_bound_roa()
     # verify_hjb_inequality_on_roa()
     # J_star, u_star, z = pendulum_sos_lower_bound(2, "integrate_ring", visualize=True)
