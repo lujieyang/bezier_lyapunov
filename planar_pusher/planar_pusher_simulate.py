@@ -70,12 +70,12 @@ def calc_optimal_conrol_nlp(z, dJdz_val, u_guess=None):
 
     return u_star
 
-def plot_traj(traj, deg):
+def plot_traj(traj, u_traj, deg):
     print("Plotting trajectory")
     fig, ax = plt.subplots()
     plt.plot(traj[:, 0], traj[:, 1], 'k')
 
-    def draw_box(x, w_pusher=False, r=0.01):
+    def draw_box(x, u, w_pusher=False, r=0.01):
         theta = x[2]
         x_object = x[0] - px*(np.cos(theta) - np.sin(theta))
         y_object = x[1] - px* (np.cos(theta) + np.sin(theta))
@@ -84,16 +84,22 @@ def plot_traj(traj, deg):
             py = x[-1]
             x_pusher = x[0] - px*np.cos(theta) - py*np.sin(theta) - r * np.cos(theta)
             y_pusher = x[1] - px*np.sin(theta) + py*np.cos(theta) - r * np.sin(theta)
-            drawing_colored_circle = plt.Circle((x_pusher, y_pusher), r, edgecolor='k', facecolor='r')
+            if u[-1] == 0:
+                facecolor = "r"
+            elif u[-1] > 0:
+                facecolor = "orange"
+            else:
+                facecolor = "blueviolet"
+            drawing_colored_circle = plt.Circle((x_pusher, y_pusher), r, edgecolor='k', facecolor=facecolor)
             ax.set_aspect( 1 )
             ax.add_artist(drawing_colored_circle)
             
-    for n in range(0, 10, 2):
-        draw_box(traj[n], w_pusher=True)
-    for n in range(10, 20, 4):
-        draw_box(traj[n], w_pusher=True)
-    for n in range(20, traj.shape[0], 10):
-        draw_box(traj[n], w_pusher=True)
+    for n in range(0, 10, 4):
+        draw_box(traj[n], u_traj[n], w_pusher=True)
+    for n in range(10, 20, 8):
+        draw_box(traj[n], u_traj[n], w_pusher=True)
+    for n in range(20, traj.shape[0]-1, 20):
+        draw_box(traj[n], u_traj[n], w_pusher=True)
     ax.add_patch(Rectangle((-px, -px), 2*px, 2*px, 0, edgecolor='deeppink', linestyle="--", linewidth=2, facecolor='none', antialiased="True"))
     plt.xlim([-0.35, 0.2])
     plt.ylim([-0.2, 0.35])
@@ -107,7 +113,7 @@ if __name__ == '__main__':
 
     x0 = np.array([-0.28, 0.28, 0, 0])
     traj, u_traj, J_traj = simulate(J_star, z_var, x0, T=10,  initial_guess=True)
-    plot_traj(traj, deg)
+    plot_traj(traj, u_traj, deg)
 
     plt.clf()
     plt.plot(J_traj)
