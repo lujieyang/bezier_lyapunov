@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import time
 from scipy.integrate import quad
 from scipy import integrate
 from utils import save_polynomial, load_polynomial
@@ -53,7 +54,7 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
         f_val = np.zeros(nz, dtype=dtype)
         f_val[0] = (c*u[0] - s*u[1])/fm**2
         f_val[1] = (s*u[0] + c*u[1])/fm**2
-        thetadot = (-z[-1]*u[0] - px*u[1])/mm**2  # Dynamics should be -px (px is positive)
+        thetadot = (-z[-1]*u[0] + px*u[1])/mm**2  # Dynamics should be -px (px is positive)
         f_val[2] = c*thetadot
         f_val[3] = -s*thetadot
         f_val[4] = u[-1]
@@ -67,7 +68,7 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
         f_val = np.zeros(nx, dtype=dtype)
         f_val[0] = (c*u[0] - s*u[1])/fm**2
         f_val[1] = (s*u[0] + c*u[1])/fm**2
-        thetadot = (-x[-1]*u[0] - px*u[1])/mm**2
+        thetadot = (-x[-1]*u[0] + px*u[1])/mm**2
         f_val[2] = thetadot
         f_val[3] = u[-1]
         return f_val
@@ -79,7 +80,7 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
         f2_val = np.zeros([nx, nu], dtype=dtype)
         f2_val[0] = np.array([c, -s, 0])/fm**2
         f2_val[1] = np.array([s, c, 0])/fm**2
-        f2_val[2] = np.array([-x[-1], -px, 0])/mm**2
+        f2_val[2] = np.array([-x[-1], px, 0])/mm**2
         f2_val[3] = np.array([0, 0, 1])
         return f2_val
     
@@ -167,7 +168,7 @@ def planar_pusher_sos_lower_bound(deg, objective="integrate_ring", visualize=Fal
         plot_value_function(J_star, z, z_max, x2z, file_name="correct_dynamics/lower_bound_{}_{}_mup_{}".format(objective, deg, mu_p), plot_states="xtheta")
     return J_star, z
 
-def planar_pusher_sos_upper_bound(deg, u_degrees, u_regression_type="ridge", objective="integrate_ring", visualize=False, test=False):
+def planar_pusher_sos_upper_bound_fit_controller(deg, u_degrees, u_regression_type="ridge", objective="integrate_ring", visualize=False, test=False):
     """x = [x, y, theta, py]
     z = [x, y, s, c, py]
     u = [fn, ft, v_py]
@@ -487,10 +488,15 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
         prog.AddCost(-obj.ToExpression())
     elif objective=="integrate_ring":
         obj = J
-        for i in non_q_idx:
+        for i in [0, 1]:
             obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        # Integrate along the boundary of the slider
+        integral = obj.EvaluatePartial({z[4]:px}).Integrate(z[5], z_min[5], z_max[5])
+        integral += obj.EvaluatePartial({z[4]:-px}).Integrate(z[5], z_min[5], z_max[5])
+        integral += obj.EvaluatePartial({z[5]:px}).Integrate(z[4], z_min[4], z_max[4])
+        integral += obj.EvaluatePartial({z[5]:-px}).Integrate(z[4], z_min[4], z_max[4])
         cost = 0
-        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+        for monomial,coeff in integral.monomial_to_coefficient_map().items(): 
             s1_deg = monomial.degree(z[2]) 
             c1_deg = monomial.degree(z[3])
             monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, -d_theta, d_theta)[0]
@@ -560,17 +566,19 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
         J_post = J_expr.Substitute(dict(zip(z[4:], z_post)))
         S_teleport = 0
         for i in int_idx:
-            lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
+            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
             S_teleport += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
+        lam_s = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+        S_s = lam_s * (n.dot(z[-2:]) + px)        
         for i in np.arange(2):
-            lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
+            lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
             S_teleport += lam*(z_post[i]-z_max[i+4])*(z_post[i]-z_min[i+4])
         # Restrain z_post to be on a different surface from z
         lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
         S_teleport += lam*(-n.dot(np.array([z_post[0], z_post[1]])))  # n.dot(p) >=0
         # Restrain z_post to be on the surface
-        lam_s = prog.NewFreePolynomial(Variables(z), deg-2).ToExpression()
-        S_s = (z_post[0]-px)*(z_post[0]+px)*(z_post[1]-px)*(z_post[1]+px)
+        lam_s_post = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+        S_s += lam_s_post*(z_post[0]-px)*(z_post[0]+px)*(z_post[1]-px)*(z_post[1]+px)
         lam_r = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
         S_r = lam_r * (z[2]**2 + z[3]**2 - 1)
         prog.AddSosConstraint(l_teleport(z[4:], z_post) + J_post - J_expr + S_teleport + S_s + S_r)
@@ -582,19 +590,24 @@ def planar_pusher_4_modes_contact_switching_sos_lower_bound(deg, objective="inte
     for i in np.arange(nz):
         lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
         S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-    prog.AddSosConstraint(J_expr + S_J + S_r)
+    lam_s = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_s += lam_s*(z[0]-px)*(z[0]+px)*(z[1]-px)*(z[1]+px)
+    prog.AddSosConstraint(J_expr + S_J + S_r + S_s)
 
     options = SolverOptions()
     options.SetOption(CommonSolverOption.kPrintToConsole, 1)
     prog.SetSolverOptions(options)
+    start_time = time.time()
     result = Solve(prog)
+    end_time = time.time()
+    print("Time: ", end_time-start_time)
     assert result.is_success()
     J_star = Polynomial(result.GetSolution(J_expr)).RemoveTermsWithSmallCoefficients(1e-6)
 
     os.makedirs("planar_pusher/data/four_modes/{}".format(Q_teleport_scale), exist_ok=True)
     os.makedirs("planar_pusher/figures/four_modes/{}".format(Q_teleport_scale), exist_ok=True)
 
-    save_polynomial(J_star, z, 'planar_pusher/data/four_modes/{}/J_lower_deg_{}_100.pkl'.format(Q_teleport_scale, deg))
+    # save_polynomial(J_star, z, 'planar_pusher/data/four_modes/{}/J_lower_deg_{}_100_more_s.pkl'.format(Q_teleport_scale, deg))
     if visualize:
         plot_value_function(J_star, z, z_max, x2z, file_name="four_modes/{}/lower_bound_constrained_lqr_{}_{}_100".format(Q_teleport_scale, objective, deg), plot_states="xtheta", switch_contact=True)
     return J_star, z
@@ -704,10 +717,15 @@ def planar_pusher_single_contact_switching_sos_lower_bound(deg, objective="integ
         prog.AddCost(-obj.ToExpression())
     elif objective=="integrate_ring":
         obj = J
-        for i in non_q_idx:
+        for i in [0, 1]:
             obj = obj.Integrate(z[i], z_min[i], z_max[i])
+        # Integrate along the boundary of the slider
+        integral = obj.EvaluatePartial({z[4]:px}).Integrate(z[5], z_min[5], z_max[5])
+        integral += obj.EvaluatePartial({z[4]:-px}).Integrate(z[5], z_min[5], z_max[5])
+        integral += obj.EvaluatePartial({z[5]:px}).Integrate(z[4], z_min[4], z_max[4])
+        integral += obj.EvaluatePartial({z[5]:-px}).Integrate(z[4], z_min[4], z_max[4])
         cost = 0
-        for monomial,coeff in obj.monomial_to_coefficient_map().items(): 
+        for monomial,coeff in integral.monomial_to_coefficient_map().items(): 
             s1_deg = monomial.degree(z[2]) 
             c1_deg = monomial.degree(z[3])
             monomial_int1 = quad(lambda x: np.sin(x)**s1_deg * np.cos(x)**c1_deg, -d_theta, d_theta)[0]
@@ -759,15 +777,19 @@ def planar_pusher_single_contact_switching_sos_lower_bound(deg, objective="integ
         lam_v = prog.NewSosPolynomial(Variables(z), int(np.ceil(lam_deg/2)*2))[0].ToExpression()  
         S_n += lam_v * (-px - v.dot(n))     
 
-    # n0 * n1 =0
-    lam_n = prog.NewFreePolynomial(Variables(z), lam_deg-2).ToExpression()
+    # n0 * n1 = 0
+    lam_n = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
     S_n += lam_n * n[0] * n[1]
+
+    # (1-n0) * (1-n1) = 0
+    lam_n = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    S_n += lam_n * (1-n[0]) * (1-n[1])
 
     # Restrain px, py to be on the surface
     lam_s = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
     S_s = lam_s * (n.dot(z[-2:]) + px)
-    lam_s = prog.NewFreePolynomial(Variables(z), lam_deg-2).ToExpression()
-    S_s += (z[-2]-px)*(z[-2]+px)*(z[-1]-px)*(z[-1]+px)
+    lam_s = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    S_s += lam_s * (z[-2]-px)*(z[-2]+px)*(z[-1]-px)*(z[-1]+px)
 
     S_Jdot = 0
     for i in range(nz):
@@ -780,10 +802,10 @@ def planar_pusher_single_contact_switching_sos_lower_bound(deg, objective="integ
     J_post = J_expr.Substitute(dict(zip(z[4:], z_post)))
     S_teleport = 0
     for i in range(nz):
-        lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
+        lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
         S_teleport += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
     for i in np.arange(2):
-        lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
+        lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
         S_teleport += lam*(z_post[i]-z_max[i+4])*(z_post[i]-z_min[i+4])
     # Restrain z_post to be on a different surface from z
     lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
@@ -791,8 +813,10 @@ def planar_pusher_single_contact_switching_sos_lower_bound(deg, objective="integ
     # Restrain z_post to be on the surface
     lam_s = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
     S_s = lam_s * (n.dot(z[-2:]) + px)
-    lam_s = prog.NewFreePolynomial(Variables(z), deg-2).ToExpression()
-    S_s += (z_post[0]-px)*(z_post[0]+px)*(z_post[1]-px)*(z_post[1]+px)
+    lam_s = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    S_s += lam_s * (z[-2]-px)*(z[-2]+px)*(z[-1]-px)*(z[-1]+px)
+    lam_s = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_s += lam_s * (z_post[0]-px)*(z_post[0]+px)*(z_post[1]-px)*(z_post[1]+px)
     lam_r = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
     S_r = lam_r * (z[2]**2 + z[3]**2 - 1)
     S_n = 0
@@ -802,16 +826,21 @@ def planar_pusher_single_contact_switching_sos_lower_bound(deg, objective="integ
     # n0 * n1 =0
     lam_n = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
     S_n += lam_n * n[0] * n[1]
-    prog.AddSosConstraint(l_teleport(z[4:], z_post) + J_post - J_expr) # + S_teleport + S_s + S_r + S_n)
+    # (1-n0) * (1-n1) = 0
+    lam_n = prog.NewFreePolynomial(Variables(z), lam_deg).ToExpression()
+    S_n += lam_n * (1-n[0]) * (1-n[1])
+    prog.AddSosConstraint(l_teleport(z[4:], z_post) + J_post - J_expr + S_teleport + S_s + S_r + S_n)
 
     # Enforce that value function is PD
     lam_r = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
     S_r = lam_r * (z[2]**2 + z[3]**2 - 1)
     S_J = 0
+    lam_s = prog.NewFreePolynomial(Variables(z), deg).ToExpression()
+    S_s += lam_s*(z[0]-px)*(z[0]+px)*(z[1]-px)*(z[1]+px)
     for i in np.arange(nz):
-        lam = prog.NewSosPolynomial(Variables(z), deg-2)[0].ToExpression()
+        lam = prog.NewSosPolynomial(Variables(z), deg)[0].ToExpression()
         S_J += lam*(z[i]-z_max[i])*(z[i]-z_min[i])
-    prog.AddSosConstraint(J_expr + S_J + S_r)
+    prog.AddSosConstraint(J_expr + S_J + S_r + S_s)
 
     options = SolverOptions()
     options.SetOption(CommonSolverOption.kPrintToConsole, 1)
@@ -830,5 +859,4 @@ def planar_pusher_single_contact_switching_sos_lower_bound(deg, objective="integ
 
 if __name__ == '__main__':
     deg = 2
-    u_degrees = [4, 4, 4]
-    J_star, z = planar_pusher_sos_upper_bound(deg, u_degrees, "ridge", visualize=True)
+    J_star, z = planar_pusher_single_contact_switching_sos_lower_bound(deg, visualize=True)
